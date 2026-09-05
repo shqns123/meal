@@ -11,10 +11,17 @@ button { font: inherit; }
 .sidebar-link.active { background: #e6f3fe; color: #0075de; }
 .calendar-cell { min-height: 136px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 10px; }
 .calendar-cell:nth-child(7n) { border-right: 0; }
+.mobile-sidebar-backdrop { transition: opacity 280ms ease-out; }
 @media (max-width: 1023px) {
   .calendar-cell { min-height: 136px; padding: 10px; }
+  .app-sidebar { transform: translate3d(-100%, 0, 0); transition: transform 360ms cubic-bezier(.22, 1, .36, 1); will-change: transform; }
+  .app-sidebar[data-mobile-open="true"] { transform: translate3d(0, 0, 0); }
 }
 
 @media (hover: none) {
   .sidebar-link:active, button:active { background-color: rgba(0, 0, 0, .06); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-sidebar, .mobile-sidebar-backdrop { transition-duration: 1ms; }
 }
