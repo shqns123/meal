@@ -8,7 +8,7 @@ export async function GET(request: Request) {
   const weekStart = new Date(`${week}T00:00:00+09:00`);
   const [mealPlans, recipes, shoppingWeek] = await Promise.all([
     prisma.mealPlan.findMany({ where: { monthKey: month }, orderBy: { date: "asc" } }),
-    prisma.recipe.findMany({ where: { weekKeys: { contains: week } }, orderBy: [{ plannedDates: "asc" }, { title: "asc" }] }),
+    prisma.recipe.findMany({ where: { weekKeys: { contains: week } }, orderBy: [{ plannedDates: "asc" }, { title: "asc" }], include: { ingredients: { orderBy: { name: "asc" } } } }),
     prisma.shoppingWeek.findUnique({ where: { startDate: weekStart }, include: { items: { orderBy: [{ usePlan: "asc" }, { name: "asc" }] } } }),
   ]);
 
@@ -34,6 +34,14 @@ export async function GET(request: Request) {
       sourceUrl: recipe.sourceUrl,
       sourceTitle: recipe.sourceTitle,
       sourceAuthor: recipe.sourceAuthor,
+      description: recipe.description,
+      prepMinutes: recipe.prepMinutes,
+      cookMinutes: recipe.cookMinutes,
+      instructions: parseList(recipe.instructions),
+      ingredients: recipe.ingredients.map((ingredient) => ({ name: ingredient.name, amount: ingredient.amount, category: ingredient.category })),
+      babySplitStep: recipe.babySplitStep,
+      storageMethod: recipe.storageMethod,
+      consumeWithin: recipe.consumeWithin,
     })),
     grocery: (shoppingWeek?.items ?? []).map((item) => ({ id: item.id, name: `${item.name} ${item.quantity}${item.unit}`, category: item.category, done: item.purchased, usePlan: item.usePlan })),
   });
