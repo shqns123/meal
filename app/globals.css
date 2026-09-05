@@ -9,6 +9,12 @@ button { font: inherit; }
 .sidebar-link { display: flex; align-items: center; gap: 10px; width: 100%; border-radius: 8px; padding: 10px 12px; color: rgba(0,0,0,.58); font-size: 14px; font-weight: 500; transition: .2s ease; }
 .sidebar-link:hover { color: #111; background: rgba(0,0,0,.04); }
 .sidebar-link.active { background: #e6f3fe; color: #0075de; }
-.calendar-cell { min-height: 111px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 10px; }
+.calendar-cell { min-height: 136px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 10px; }
 .calendar-cell:nth-child(7n) { border-right: 0; }
-@media (max-width: 900px) { .app-sidebar { display: none; } .calendar-cell { min-height: 90px; padding: 7px; } }
+@media (max-width: 1023px) {
+  .calendar-cell { min-height: 136px; padding: 10px; }
+}
+
+@media (hover: none) {
+  .sidebar-link:active, button:active { background-color: rgba(0, 0, 0, .06); }
+}
