@@ -19,6 +19,7 @@ export async function POST(request: Request) {
   const before = body.date ? await readMeal(body.date) : null;
   if (body.action === "UPDATE_DAY" && !before) return NextResponse.json({ error: "Meal plan was not found for the selected date" }, { status: 404 });
 
+  const requestedAt = new Date();
   const payload = {
     task: body.action === "UPDATE_DAY" ? "update_meal_day" : "publish_week_recipes",
     prompt: body.prompt,
@@ -41,8 +42,17 @@ export async function POST(request: Request) {
     });
     if (!upstream.ok) return NextResponse.json({ error: "Agent request failed" }, { status: 502 });
     const result = await upstream.json();
+    const job = body.action === "UPDATE_DAY" && body.weekStart
+      ? await waitForAgentJob(body.weekStart, requestedAt)
+      : null;
     const after = body.date ? await readMeal(body.date) : null;
     const changed = Boolean(before && after && JSON.stringify(before) !== JSON.stringify(after));
+    if (job?.status === "FAILED") {
+      return NextResponse.json({ error: "Hermes could not publish the meal update", message: "Hermes가 식단 반영에 실패했습니다. Hermes 로그를 확인해 주세요.", upstream: result }, { status: 502 });
+    }
+    if (body.action === "UPDATE_DAY" && !job) {
+      return NextResponse.json({ accepted: true, pending: true, message: "Hermes가 레시피와 장보기를 검증하며 식단을 처리하고 있습니다. 완료 후 페이지를 새로고침해 확인해 주세요.", result: body.date ? { changed: false, before, after } : null, upstream: result });
+    }
     const message = body.action === "UPDATE_DAY"
       ? changed ? "Hermes가 식단을 수정했습니다." : "Hermes가 검토했지만 이 날짜의 식단은 유지했습니다."
       : "Hermes가 주간 요청을 처리했습니다. 반영 결과는 레시피와 장보기 탭에서 확인하세요.";
@@ -53,6 +63,22 @@ export async function POST(request: Request) {
     { error: "Agent is not connected", message: "Set AGENT_WEBHOOK_URL to connect Hermes or Codex." },
     { status: 503 },
   );
+}
+
+async function waitForAgentJob(weekStart: string, requestedAt: Date) {
+  const deadline = Date.now() + 165_000;
+  const startedAfter = new Date(requestedAt.getTime() - 5_000);
+  const week = new Date(`${weekStart}T00:00:00+09:00`);
+  while (Date.now() < deadline) {
+    const job = await prisma.agentJob.findFirst({
+      where: { weekStart: week, createdAt: { gte: startedAfter } },
+      orderBy: { createdAt: "desc" },
+      select: { status: true },
+    });
+    if (job?.status === "COMPLETED" || job?.status === "FAILED") return job;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
+  return null;
 }
 
 async function readMeal(date: string) {

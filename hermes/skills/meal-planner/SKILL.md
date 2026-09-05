@@ -18,7 +18,7 @@ Use this skill when a scheduled run or the owner asks Hermes to prepare, update,
 
 ## Safety boundary
 
-- The project root is `${MEAL_PLAN_ROOT:-/workspace/meal-plan}`.
+- The project root is `${MEAL_PLAN_ROOT:-/opt/data/meal}`.
 - Read `AGENTS.md` and `MEAL.md` completely before every generation or update.
 - Never edit `mealplan.db` with raw SQL and never modify application source code for a meal-plan update.
 - Use only `scripts/mealctl.mjs` to read context, validate, and publish generated data.
@@ -33,7 +33,7 @@ Use this skill when a scheduled run or the owner asks Hermes to prepare, update,
 1. Set the project path and selected Sunday:
 
    ```bash
-   export MEAL_PLAN_ROOT=/workspace/meal-plan
+   export MEAL_PLAN_ROOT=/opt/data/meal
    cd "$MEAL_PLAN_ROOT"
    node scripts/mealctl.mjs context --week YYYY-MM-DD
    ```
@@ -53,7 +53,7 @@ Use this skill when a scheduled run or the owner asks Hermes to prepare, update,
    - optional `mealChanges`
    - `recipes`
 
-   For an `update_meal_day` webhook request, `mealChanges` must contain exactly the requested date with the final `main`, exactly two `sides`, and any changed `lunch`, `baby`, or `note`. For a review that keeps the meal unchanged, omit `mealChanges` and still report that the meal was retained. Never change a different date unless the owner's prompt explicitly asks for it.
+   For an `update_meal_day` webhook request that asks to change or replace a meal, `mealChanges` must contain exactly the requested date with a genuinely different final `main` or sides, exactly two `sides`, and any changed `lunch`, `baby`, or `note`. Do not silently keep the same meal: retain it only when the owner explicitly asks for a review/maintenance decision or when no safe, validated alternative can be published; in the latter case, report the concrete blocking reason. Never change a different date unless the owner's prompt explicitly asks for it.
 
 6. Create recipe coverage for every dinner main and side dish used on each date. For a weekend lunch eaten at home, include at least one `점심` recipe for that date.
 7. Each recipe must include:
