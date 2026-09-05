@@ -2,19 +2,17 @@
 
 ## Synology 볼륨
 
-실제 NAS 경로는 환경에 맞게 바꾼다. Hermes 컨테이너의 사용자 홈이 `/root`가 아니면 스킬 마운트 대상도 해당 홈으로 변경한다.
+실제 NAS 경로는 환경에 맞게 바꾼다. Hermes Agent는 `HERMES_HOME` 아래의 `config.yaml`과 `skills/`를 읽는다. `HERMES_HOME=/opt/data`인 Synology 컨테이너에서는 각각 `/opt/data/config.yaml`, `/opt/data/skills/`가 대상이다.
 
 ```yaml
 environment:
-  MEAL_PLAN_ROOT: /workspace/meal-plan
-  MEAL_DB_PATH: /workspace/meal-plan/data/mealplan.db
+  MEAL_PLAN_ROOT: /opt/data/meal
+  MEAL_DB_PATH: /opt/data/meal/data/mealplan.db
   TZ: Asia/Seoul
 volumes:
-  - /volume1/docker/meal-plan/AGENTS.md:/workspace/meal-plan/AGENTS.md:ro
-  - /volume1/docker/meal-plan/MEAL.md:/workspace/meal-plan/MEAL.md:ro
-  - /volume1/docker/meal-plan/scripts:/workspace/meal-plan/scripts:ro
-  - /volume1/docker/meal-plan/data:/workspace/meal-plan/data:rw
-  - /volume1/docker/meal-plan/hermes/skills/meal-planner:/root/.hermes/skills/meal-planner:ro
+  - /volume1/docker/Meal:/opt/data/meal:ro
+  - /volume1/docker/Meal/data:/opt/data/meal/data:rw
+  - /volume1/docker/Meal/hermes/skills/meal-planner:/opt/data/skills/meal-planner:ro
 ```
 
 Hermes를 재시작한 뒤 `meal-planner` 스킬이 검색되는지 확인한다. Hermes는 `~/.hermes/skills/` 아래의 `SKILL.md`를 스킬로 읽는다.
@@ -35,7 +33,7 @@ WEBHOOK_PORT=8644
 WEBHOOK_SECRET=충분히-긴-임의의-비밀값
 ```
 
-`~/.hermes/config.yaml`에 웹앱 전용 경로를 등록한다.
+`HERMES_HOME/config.yaml`에 웹앱 전용 경로를 등록한다. 위 Synology 구성에서는 NAS의 `/volume1/docker/hermes/data/config.yaml` 파일이다.
 
 ```yaml
 platforms:
@@ -86,7 +84,7 @@ hermes cron create "0 20 * * 0" \
 Hermes 컨테이너 안에서 다음을 실행한다.
 
 ```bash
-cd /workspace/meal-plan
+cd /opt/data/meal
 node scripts/mealctl.mjs context --week 2026-09-06
 ```
 
