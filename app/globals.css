@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+:root { --paper: #f6f5f4; --ink: #111111; --blue: #0075de; --line: rgba(0,0,0,.08); }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: Arial, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+button { font: inherit; }
+::selection { background: #cfe8ff; }
+.editorial { font-family: Georgia, "Noto Serif KR", serif; }
+.sidebar-link { display: flex; align-items: center; gap: 10px; width: 100%; border-radius: 8px; padding: 10px 12px; color: rgba(0,0,0,.58); font-size: 14px; font-weight: 500; transition: .2s ease; }
+.sidebar-link:hover { color: #111; background: rgba(0,0,0,.04); }
+.sidebar-link.active { background: #e6f3fe; color: #0075de; }
+.calendar-cell { min-height: 111px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 10px; }
+.calendar-cell:nth-child(7n) { border-right: 0; }
+@media (max-width: 900px) { .app-sidebar { display: none; } .calendar-cell { min-height: 90px; padding: 7px; } }

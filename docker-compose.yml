@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      DATABASE_URL: file:/app/data/mealplan.db
+      AGENT_WEBHOOK_URL: ${AGENT_WEBHOOK_URL:-}
+      AGENT_WEBHOOK_TOKEN: ${AGENT_WEBHOOK_TOKEN:-}
+    volumes:
+      - ./data:/app/data
