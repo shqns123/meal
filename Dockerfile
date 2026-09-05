@@ -1,7 +1,7 @@
 FROM node:24-alpine
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm ci --fetch-retries=5 --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=60000
 COPY . .
 RUN npx prisma generate && npm run build
 ENV NODE_ENV=production
