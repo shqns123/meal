@@ -164,6 +164,19 @@ model AgentJob {
   @@index([weekStart, createdAt])
 }
 
+model AgentChat {
+  id          String   @id
+  question    String
+  status      String   @default("RUNNING")
+  answer      String?
+  sources     String?
+  error       String?
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+
+  @@index([createdAt])
+}
+
 enum MealType {
   BREAKFAST
   LUNCH

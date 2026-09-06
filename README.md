@@ -7,7 +7,7 @@ Next.js 15 + React 19 기반의 가족 식단 플래너입니다. Notion에서 �
 - 사이드바 기반의 월간/주간 식단 플래너
 - 레시피 및 장보기 목록 UI
 - 가족 구성원, 레시피, 재료, 식단을 위한 Prisma/SQLite 스키마
-- 외부 Hermes/Codex 에이전트를 위한 `POST /api/agent/meal-plan` 웹훅 어댑터
+- 외부 Hermes/Codex 에이전트를 위한 식단 발행 웹훅과 읽기 전용 채팅 웹훅
 
 ## 로컬 실행
 
@@ -32,4 +32,6 @@ docker compose exec app npx prisma db push
 
 ## 에이전트 연결
 
-`AGENT_WEBHOOK_URL`에 Hermes 또는 Codex를 호출하는 중계 서버 URL을 넣습니다. 요청은 `task: "create_meal_plan"`, 사용자 프롬프트, 가족 정보, 시작일과 일수를 JSON으로 보냅니다. 웹훅이 비어 있으면 개발용 식단 미리보기를 반환합니다.
+`AGENT_WEBHOOK_URL`에 Hermes 또는 Codex를 호출하는 중계 서버 URL을 넣습니다. 요청은 식단 생성·수정 작업을 보냅니다.
+
+사이드바의 **Hermes에게 물어보기** 채팅은 별도의 읽기 전용 웹훅을 사용합니다. 식단을 바꾸지 않고 DB 정보를 답하거나, 필요할 때 웹 검색 결과를 출처와 함께 보여 줍니다. NAS Hermes 설정은 [HERMES_CHAT_SETUP.md](HERMES_CHAT_SETUP.md)를 참고하세요.

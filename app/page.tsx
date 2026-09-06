@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, ExternalLink, Menu, MoreHorizontal, Pencil, Plus, RefreshCw, Search, ShoppingBasket, Sparkles, Trash2, UsersRound, X } from "lucide-react";
+import { BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, ExternalLink, LoaderCircle, Menu, MessageCircle, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Send, ShoppingBasket, Sparkles, Trash2, UsersRound, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -12,6 +12,7 @@ type AgentRequest = { prompt: string; action: "PUBLISH_WEEK" | "UPDATE_DAY"; dat
 type MealSnapshot = { date: string; lunch?: string | null; main: string; sides: string[]; baby?: string | null; note?: string | null; changeReason?: string | null };
 type DayUpdateResult = { changed: boolean; before: MealSnapshot | null; after: MealSnapshot | null };
 type DayDetail = { date: string; meal: { lunch?: string | null; main?: string | null; sides: string[]; baby?: string | null; note?: string | null } | null; fatherSchedule: { isWorking: boolean; eatsAtCompany: boolean; isAway: boolean; note: string } };
+type ChatMessage = { role: "user" | "assistant"; content: string; sources?: { title?: string; url: string }[] };
 const nav = [[CalendarDays, "이 달의 식단"], [BookOpen, "레시피"], [ShoppingBasket, "장보기"], [UsersRound, "우리 가족"]] as const;
 const seedMeals: Meal[] = [];
 const seedRecipes: Recipe[] = [];
@@ -24,6 +25,7 @@ export default function Home() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [agentRequest, setAgentRequest] = useState<AgentRequest | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
   const [mealItems, setMealItems] = useState(seedMeals);
   const [recipes, setRecipes] = useState(seedRecipes);
   const [grocery, setGrocery] = useState(seedGrocery);
@@ -54,7 +56,7 @@ export default function Home() {
           <button type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} className="hidden h-9 w-9 shrink-0 place-items-center rounded-lg text-black/45 transition-colors hover:bg-black/[.05] hover:text-black focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 lg:grid" aria-label={sidebarCollapsed ? "사이드바 펼치기" : "사이드바 접기"}>{sidebarCollapsed ? <ChevronRight size={16}/> : <ChevronLeft size={16}/>}</button>
         </div>
         <div className="space-y-1">{nav.map(([Icon, label]) => <button key={label} onClick={() => { setActive(label); setMobileNavOpen(false); }} title={sidebarCollapsed ? label : undefined} className={`sidebar-link ${active === label ? "active" : ""} ${sidebarCollapsed ? "justify-center px-0" : ""}`}><Icon size={18}/>{!sidebarCollapsed && label}</button>)}</div>
-        <div className={`absolute bottom-5 ${sidebarCollapsed ? "left-3 right-3" : "left-4 right-4"}`}><div className={`flex items-center rounded-xl bg-[#f6f5f4] p-3 ${sidebarCollapsed ? "justify-center" : "gap-2"}`}><span className="grid h-7 w-7 place-items-center rounded-full bg-[#0975de] text-xs text-white">우</span>{!sidebarCollapsed && <><span className="text-sm font-medium">우진 님</span><MoreHorizontal className="ml-auto text-black/40" size={17}/></>}</div></div>
+        <div className={`absolute bottom-5 ${sidebarCollapsed ? "left-3 right-3" : "left-4 right-4"}`}><button type="button" onClick={() => { setChatOpen(true); setMobileNavOpen(false); }} title={sidebarCollapsed ? "Hermes에게 물어보기" : undefined} className={`mb-2 flex h-11 w-full items-center rounded-xl bg-[#0d1247] text-white shadow-sm transition-colors hover:bg-[#171e62] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${sidebarCollapsed ? "justify-center" : "gap-2 px-3"}`}><MessageCircle size={18}/>{!sidebarCollapsed && <span className="text-sm font-medium">Hermes에게 물어보기</span>}</button><div className={`flex items-center rounded-xl bg-[#f6f5f4] p-3 ${sidebarCollapsed ? "justify-center" : "gap-2"}`}><span className="grid h-7 w-7 place-items-center rounded-full bg-[#0975de] text-xs text-white">우</span>{!sidebarCollapsed && <><span className="text-sm font-medium">우진 님</span><MoreHorizontal className="ml-auto text-black/40" size={17}/></>}</div></div>
       </aside>
       <section className={`min-w-0 flex-1 pt-16 transition-[margin] duration-200 lg:pt-0 ${sidebarCollapsed ? "lg:ml-[72px]" : "lg:ml-[252px]"}`}><div className="mx-auto max-w-[1440px] p-5 md:p-9">
         {active === "이 달의 식단" && <MealPlanner view={view} setView={setView} month={selectedMonth} onChangeMonth={(amount) => setSelectedMonth((current) => shiftMonth(current, amount))} meals={mealItems} onOpenDay={setSelectedDate} onEditDay={(date) => setAgentRequest({ action: "UPDATE_DAY", date, prompt: `${date.slice(8)}일 식단을 가족 일정과 보유 재료에 맞게 수정하고, 변경된 주찬과 부찬의 검증된 블로그 레시피 및 장보기를 다시 게시해줘.` })}/>}
@@ -64,6 +66,7 @@ export default function Home() {
       </div></section>
       {selectedDate && <DayDetailModal date={selectedDate} close={() => setSelectedDate(null)}/>}
       {agentRequest && <AgentModal request={agentRequest} close={() => setAgentRequest(null)} onPublished={() => setRefreshVersion((version) => version + 1)}/>}
+      {chatOpen && <ChatModal close={() => setChatOpen(false)}/>}
     </main>
   );
 }
@@ -101,6 +104,38 @@ function DayDetailModal({ date, close }: { date: string; close: () => void }) {
   };
   const schedule = detail?.fatherSchedule;
   return <div onMouseDown={(event) => event.target === event.currentTarget && close()} className="fixed inset-0 z-50 grid overflow-y-auto bg-black/25 p-4 sm:place-items-center"><Card onMouseDown={(event) => event.stopPropagation()} className="my-auto w-full max-w-lg"><CardContent><div className="flex items-start justify-between"><div><p className="text-sm text-black/45">날짜 상세</p><h2 className="mt-1 text-2xl font-semibold tracking-tight">{date.replaceAll("-", ".")} 식단</h2></div><button onClick={close} className="text-xl text-black/35" aria-label="닫기">×</button></div>{!detail ? <p className="py-12 text-center text-sm text-black/45">불러오는 중...</p> : <><section className="mt-6 rounded-xl bg-[#f6f5f4] p-4"><p className="text-xs font-semibold tracking-[.08em] text-black/40">식단</p>{detail.meal ? <div className="mt-3 space-y-2 text-sm"><p><span className="text-black/45">점심</span> · {detail.meal.lunch ?? "계획 없음"}</p><p className="font-medium">주찬 · {detail.meal.main ?? "계획 없음"}</p>{detail.meal.sides.map((side) => <p key={side} className="text-black/65">부찬 · {side}</p>)}{detail.meal.baby && <p className="text-black/65">아기 · {detail.meal.baby}</p>}{detail.meal.note && <p className="pt-1 text-xs text-black/45">메모 · {detail.meal.note}</p>}</div> : <p className="mt-3 text-sm text-black/45">등록된 식단이 없습니다.</p>}</section><section className="mt-4 rounded-xl border border-black/[.08] p-4"><div><p className="text-xs font-semibold tracking-[.08em] text-black/40">아빠 일정</p><p className="mt-1 text-sm text-black/55">출근 및 식사 여부를 저장하면 다음 식단 검토에 반영됩니다.</p></div><div className="mt-4 space-y-3 text-sm"><label className="flex items-center justify-between"><span>출근</span><input type="checkbox" checked={schedule?.isWorking ?? false} onChange={(event) => updateSchedule("isWorking", event.target.checked)} className="h-4 w-4 accent-[#0075de]"/></label><label className={`flex items-center justify-between ${(schedule?.isWorking ?? false) ? "" : "text-black/30"}`}><span>회사에서 식사</span><input type="checkbox" disabled={!schedule?.isWorking} checked={schedule?.eatsAtCompany ?? false} onChange={(event) => updateSchedule("eatsAtCompany", event.target.checked)} className="h-4 w-4 accent-[#0075de]"/></label><label className="flex items-center justify-between"><span>집에서 저녁 미식사</span><input type="checkbox" checked={schedule?.isAway ?? false} onChange={(event) => updateSchedule("isAway", event.target.checked)} className="h-4 w-4 accent-[#0075de]"/></label><textarea value={schedule?.note ?? ""} onChange={(event) => updateSchedule("note", event.target.value)} className="h-20 w-full resize-none rounded-lg border border-black/[.12] p-3 text-sm outline-none focus:border-[#0075de]" placeholder="예: 토요일 출근, 점심 회사 식사"/></div><Button disabled={saving} onClick={save} className="mt-4 w-full">{saving ? "저장 중..." : "아빠 일정 저장"}</Button></section></>}</CardContent></Card></div>;
+}
+function ChatModal({ close }: { close: () => void }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([{ role: "assistant", content: "오늘 식단, 레시피, 장보기처럼 우리집 식탁에 관한 것을 물어보세요. 필요하면 웹에서 확인한 정보도 함께 알려드릴게요." }]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const messageArea = useRef<HTMLDivElement>(null);
+  useEffect(() => { messageArea.current?.scrollTo({ top: messageArea.current.scrollHeight, behavior: "smooth" }); }, [messages, loading]);
+  const send = async () => {
+    const content = input.trim();
+    if (!content || loading) return;
+    const nextMessages = [...messages, { role: "user" as const, content }];
+    setMessages(nextMessages); setInput(""); setLoading(true);
+    try {
+      const response = await fetch("/api/agent/meal-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, conversation: messages.slice(-8) }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? data.error ?? "Hermes가 답변을 처리하지 못했습니다.");
+      const deadline = Date.now() + 95_000;
+      let result: { status?: string; answer?: string; sources?: ChatMessage["sources"]; error?: string } | null = null;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+        const statusResponse = await fetch(`/api/agent/meal-chat?id=${encodeURIComponent(data.id)}`);
+        if (!statusResponse.ok) continue;
+        const nextResult = await statusResponse.json() as { status?: string; answer?: string; sources?: ChatMessage["sources"]; error?: string };
+        result = nextResult;
+        if (nextResult.status === "COMPLETED" || nextResult.status === "FAILED") break;
+      }
+      if (result?.status === "COMPLETED") setMessages((current) => [...current, { role: "assistant", content: result.answer ?? "Hermes가 빈 답변을 남겼습니다.", sources: result.sources }]);
+      else setMessages((current) => [...current, { role: "assistant", content: result?.error ?? "Hermes가 아직 답변을 마치지 못했습니다. 잠시 후 다시 질문해 주세요." }]);
+    } catch (error) { setMessages((current) => [...current, { role: "assistant", content: error instanceof Error ? error.message : "Hermes에 연결할 수 없습니다." }]); }
+    finally { setLoading(false); }
+  };
+  return <div onMouseDown={(event) => event.target === event.currentTarget && close()} className="fixed inset-0 z-50 grid overflow-y-auto bg-black/30 p-4 sm:place-items-center"><Card onMouseDown={(event) => event.stopPropagation()} className="my-auto flex h-[min(680px,calc(100dvh-2rem))] w-full max-w-2xl flex-col overflow-hidden"><div className="flex items-start justify-between border-b border-black/[.08] px-5 py-4"><div><div className="flex items-center gap-2 text-sm text-[#0075de]"><MessageCircle size={16}/><span className="font-medium">Hermes 채팅</span></div><h2 className="mt-1 text-xl font-semibold tracking-tight">우리집 식탁에게 물어보기</h2></div><button onClick={close} className="grid h-10 w-10 place-items-center rounded-lg text-xl text-black/35 hover:bg-black/[.05]" aria-label="닫기">×</button></div><div ref={messageArea} className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-[#fcfbfa] p-5">{messages.map((message, index) => <div key={`${message.role}-${index}`} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}><div className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-6 ${message.role === "user" ? "rounded-br-md bg-[#0d1247] text-white" : "rounded-bl-md bg-white text-black/75 shadow-sm ring-1 ring-black/[.06]"}`}><p className="whitespace-pre-wrap">{message.content}</p>{message.sources?.length ? <div className="mt-3 border-t border-black/[.08] pt-2">{message.sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs font-medium text-[#0075de] hover:underline"><ExternalLink size={12}/>{source.title ?? "참고 자료"}</a>)}</div> : null}</div></div>)}{loading && <div className="flex justify-start"><div className="flex items-center gap-2 rounded-2xl rounded-bl-md bg-white px-4 py-3 text-sm text-black/50 shadow-sm ring-1 ring-black/[.06]"><LoaderCircle className="animate-spin" size={15}/>Hermes가 확인 중이에요</div></div>}</div><form onSubmit={(event) => { event.preventDefault(); void send(); }} className="border-t border-black/[.08] bg-white p-3"><div className="flex items-end gap-2 rounded-xl border border-black/[.12] bg-[#fcfbfa] p-2 focus-within:border-[#0075de]"><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} disabled={loading} className="max-h-28 min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none placeholder:text-black/35" placeholder="예: 오늘 저녁 칼로리는 몇이야?" aria-label="Hermes에게 질문하기"/><button type="submit" disabled={!input.trim() || loading} className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#0d1247] text-white transition-colors hover:bg-[#171e62] disabled:cursor-not-allowed disabled:bg-black/15" aria-label="보내기"><Send size={16}/></button></div><p className="px-1 pt-2 text-[11px] text-black/40">채팅은 읽기 전용입니다. 식단 변경은 날짜 상세의 Hermes 요청을 이용해 주세요.</p></form></Card></div>;
 }
 function AgentModal({ request, close, onPublished }: { request: AgentRequest; close: () => void; onPublished: () => void }) {
   const [prompt, setPrompt] = useState(request.prompt);

@@ -9,7 +9,7 @@ const dbPath = process.env.MEAL_DB_PATH ?? path.join(root, "data", "mealplan.db"
 const command = process.argv[2];
 const flags = parseFlags(process.argv.slice(3));
 
-if (!command || !["context", "validate-week", "publish-week"].includes(command)) usage();
+if (!command || !["context", "validate-week", "publish-week", "reply-chat"].includes(command)) usage();
 if (!fs.existsSync(dbPath)) fail(`Database not found: ${dbPath}`);
 
 const db = new DatabaseSync(dbPath);
@@ -29,7 +29,8 @@ function usage() {
   console.error(`Usage:
   node scripts/mealctl.mjs context --week YYYY-MM-DD
   node scripts/mealctl.mjs validate-week --input /path/week.json [--week YYYY-MM-DD]
-  node scripts/mealctl.mjs publish-week --input /path/week.json --week YYYY-MM-DD`);
+  node scripts/mealctl.mjs publish-week --input /path/week.json --week YYYY-MM-DD
+  node scripts/mealctl.mjs reply-chat --id REQUEST_ID --input /path/chat-response.json`);
   process.exit(1);
 }
 
@@ -254,6 +255,20 @@ function publishWeek(payload, weekStart) {
   }
 }
 
+function replyChat(payload, id) {
+  if (!String(id ?? "").trim() || String(id).length > 120) fail("--id is required.");
+  const answer = String(payload?.answer ?? "").trim();
+  if (!answer) fail("answer is required.");
+  if (answer.length > 12_000) fail("answer is too long.");
+  const sources = Array.isArray(payload?.sources) ? payload.sources
+    .filter((source) => source && typeof source.url === "string" && /^https?:\/\//.test(source.url))
+    .slice(0, 8)
+    .map((source) => ({ title: typeof source.title === "string" ? source.title.slice(0, 300) : undefined, url: source.url })) : [];
+  const result = db.prepare('UPDATE "AgentChat" SET "status"=?,"answer"=?,"sources"=?,"error"=NULL,"completedAt"=? WHERE "id"=? AND "status"="RUNNING"').run("COMPLETED", answer, JSON.stringify(sources), Date.now(), id);
+  if (result.changes !== 1) fail("Chat request was not found or is already completed.");
+  printJson({ success: true, id, sources: sources.length });
+}
+
 try {
   if (command === "context") printJson(loadContext(requireWeek(flags.week)));
   if (command === "validate-week") {
@@ -263,6 +278,7 @@ try {
     if (!result.valid) process.exitCode = 2;
   }
   if (command === "publish-week") publishWeek(readPayload(flags.input), requireWeek(flags.week));
+  if (command === "reply-chat") replyChat(readPayload(flags.input), flags.id);
 } finally {
   db.close();
 }
