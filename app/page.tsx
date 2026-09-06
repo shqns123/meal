@@ -63,7 +63,7 @@ export default function Home() {
         {active === "우리 가족" && <Family/>}
       </div></section>
       {selectedDate && <DayDetailModal date={selectedDate} close={() => setSelectedDate(null)}/>}
-      {agentRequest && <AgentModal request={agentRequest} close={() => setAgentRequest(null)} onPublished={() => setRefreshVersion((version) => version + 1)}/>} 
+      {agentRequest && <AgentModal request={agentRequest} close={() => setAgentRequest(null)} onPublished={() => setRefreshVersion((version) => version + 1)}/>}
     </main>
   );
 }
