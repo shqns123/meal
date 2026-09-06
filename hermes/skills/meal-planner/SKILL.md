@@ -1,7 +1,7 @@
 ---
 name: meal-planner
 description: Research verified Korean blog recipes, adapt them to the family rules, and publish the selected week's recipes and shopping list through mealctl.
-version: 1.1.0
+version: 1.2.0
 platforms: [linux]
 metadata:
   hermes:
@@ -41,6 +41,7 @@ Use this skill when a scheduled run or the owner asks Hermes to prepare, update,
 2. Use the returned meals, family schedules, pantry, budget, recipe library, and output contract. Do not change the monthly meal plan unless the owner's request explicitly requires it.
 3. For every main or side dish, first look for a verified exact-title match in `recipeLibrary`.
    - Reuse a verified library recipe and its checked source when it still matches the planned dish.
+   - If the owner explicitly asks to regenerate or distrusts the existing recipes, treat every recipe in the selected week as marked for refresh. Do not reuse its existing source without opening and checking it again; keep the monthly meal plan unchanged unless the owner requests a menu change.
    - Otherwise search Korean cooking blogs. Prefer `blog.naver.com`, `m.blog.naver.com`, and `*.tistory.com`.
    - Search with the exact dish name plus `레시피`, `재료`, and `만드는 법`. Compare at least two credible candidates when available.
    - Open the candidate page with `web_extract`. A search snippet alone is not verification.

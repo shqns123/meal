@@ -42,7 +42,7 @@ export async function POST(request: Request) {
     });
     if (!upstream.ok) return NextResponse.json({ error: "Agent request failed" }, { status: 502 });
     const result = await upstream.json();
-    const job = body.action === "UPDATE_DAY" && body.weekStart
+    const job = (body.action === "UPDATE_DAY" || body.action === "PUBLISH_WEEK") && body.weekStart
       ? await waitForAgentJob(body.weekStart, requestedAt)
       : null;
     const after = body.date ? await readMeal(body.date) : null;
@@ -50,7 +50,7 @@ export async function POST(request: Request) {
     if (job?.status === "FAILED") {
       return NextResponse.json({ error: "Hermes could not publish the meal update", message: "Hermes가 식단 반영에 실패했습니다. Hermes 로그를 확인해 주세요.", upstream: result }, { status: 502 });
     }
-    if (body.action === "UPDATE_DAY" && !job) {
+    if ((body.action === "UPDATE_DAY" || body.action === "PUBLISH_WEEK") && !job) {
       return NextResponse.json({ accepted: true, pending: true, message: "Hermes가 레시피와 장보기를 검증하며 식단을 처리하고 있습니다. 완료 후 페이지를 새로고침해 확인해 주세요.", result: body.date ? { changed: false, before, after } : null, upstream: result });
     }
     const message = body.action === "UPDATE_DAY"
