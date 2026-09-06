@@ -30,13 +30,13 @@ Use this skill when a scheduled run or the owner asks Hermes to prepare, update,
 
 ## Mandatory execution gate
 
-For every `update_meal_day` or `publish_week_recipes` webhook request, a conversational response is **not** completion. Do not say that a menu was checked, selected, changed, or ready until the required `mealctl` commands have actually run.
+For every `update_meal_day`, `publish_week_recipes`, or `review_week_plan` webhook request, a conversational response is **not** completion. Do not say that a menu was checked, selected, changed, or ready until the required `mealctl` commands have actually run.
 
 1. Run `context` with the requested week before any web search.
 2. Research and prepare the required JSON.
-3. Run `validate-week` and correct every error.
-4. Run `publish-week` successfully.
-5. Run `context` once more to confirm the data is present.
+3. For a `review_week_plan` that genuinely needs no meal change, run `node scripts/mealctl.mjs record-review --week YYYY-MM-DD --summary "why the plan is retained"`.
+4. For a changed plan, run `validate-week`, correct every error, then run `publish-week` successfully.
+5. After publishing, run `context` once more to confirm the data is present.
 
 Only then give a short completion report including the `jobId`. If a terminal command, source verification, or validation fails, stop and report the concrete failure instead; never substitute a researched recommendation for a published update.
 
@@ -50,7 +50,7 @@ Only then give a short completion report including the `jobId`. If a terminal co
    node scripts/mealctl.mjs context --week YYYY-MM-DD
    ```
 
-2. Use the returned meals, family schedules, pantry, budget, recipe library, and output contract. Do not change the monthly meal plan unless the owner's request explicitly requires it.
+2. Use the returned meals, family schedules, pantry, budget, `weeklyReview`, recipe library, and output contract. The weekly review is the owner's latest budget balance, outside-meal plan, food preferences, and notes. Prioritize ingredients with a near expiry date; do not change the plan merely because long-storage ingredients remain. Do not change the monthly meal plan unless the owner's request explicitly requires it.
 3. For every main or side dish, first look for a verified exact-title match in `recipeLibrary`.
    - Reuse a verified library recipe and its checked source when it still matches the planned dish.
    - If the owner explicitly asks to regenerate or distrusts the existing recipes, treat every recipe in the selected week as marked for refresh. Do not reuse its existing source without opening and checking it again; keep the monthly meal plan unchanged unless the owner requests a menu change.

@@ -9,7 +9,7 @@ const dbPath = process.env.MEAL_DB_PATH ?? path.join(root, "data", "mealplan.db"
 const command = process.argv[2];
 const flags = parseFlags(process.argv.slice(3));
 
-if (!command || !["context", "validate-week", "publish-week", "reply-chat"].includes(command)) usage();
+if (!command || !["context", "validate-week", "publish-week", "reply-chat", "record-review"].includes(command)) usage();
 if (!fs.existsSync(dbPath)) fail(`Database not found: ${dbPath}`);
 
 const db = new DatabaseSync(dbPath);
@@ -30,7 +30,8 @@ function usage() {
   node scripts/mealctl.mjs context --week YYYY-MM-DD
   node scripts/mealctl.mjs validate-week --input /path/week.json [--week YYYY-MM-DD]
   node scripts/mealctl.mjs publish-week --input /path/week.json --week YYYY-MM-DD
-  node scripts/mealctl.mjs reply-chat --id REQUEST_ID --input /path/chat-response.json`);
+  node scripts/mealctl.mjs reply-chat --id REQUEST_ID --input /path/chat-response.json
+  node scripts/mealctl.mjs record-review --week YYYY-MM-DD --summary "reason"`);
   process.exit(1);
 }
 
@@ -60,6 +61,7 @@ function loadContext(weekStart) {
   const schedules = db.prepare(`SELECT s.*, m.name AS memberName, m.role AS memberRole FROM "FamilySchedule" s JOIN "FamilyMember" m ON m.id=s.memberId WHERE s.date>=? AND s.date<? ORDER BY s.date`).all(startMs, endExclusiveMs);
   const pantry = db.prepare('SELECT * FROM "PantryItem" ORDER BY CASE WHEN "expiresAt" IS NULL THEN 1 ELSE 0 END, "expiresAt", "name"').all();
   const budgetPeriods = db.prepare('SELECT * FROM "BudgetPeriod" WHERE "endDate" >= ? AND "startDate" < ? ORDER BY "startDate"').all(startMs, endExclusiveMs);
+  const weeklyReview = db.prepare('SELECT * FROM "WeeklyReview" WHERE "weekStart"=?').get(startMs) ?? null;
   const existingRecipes = db.prepare('SELECT "id","title","category","plannedDates","sourceUrl","sourceTitle","sourceAuthor","sourceDomain","sourceCheckedAt","needsReview" FROM "Recipe" WHERE "weekKeys" LIKE ? ORDER BY "plannedDates","title"').all(`%${weekStart}%`);
   const recipeLibrary = db.prepare('SELECT "id","title","category","sourceUrl","sourceTitle","sourceAuthor","sourceDomain","sourceCheckedAt" FROM "Recipe" WHERE "needsReview"=0 AND "sourceUrl" IS NOT NULL ORDER BY "title"').all();
   return {
@@ -73,6 +75,7 @@ function loadContext(weekStart) {
     meals: mealRows.map((meal) => ({ date: formatKst(meal.date), lunch: meal.lunchPlan, main: meal.mainDish, sides: parseJsonList(meal.sideDishes), baby: meal.babyMenu, note: meal.cookingNote })),
     pantry,
     budgetPeriods,
+    weeklyReview,
     existingRecipes,
     recipeLibrary,
     outputContract: {
@@ -269,6 +272,14 @@ function replyChat(payload, id) {
   printJson({ success: true, id, sources: sources.length });
 }
 
+function recordReview(weekStart, summary) {
+  if (!String(summary ?? "").trim()) fail("--summary is required.");
+  const jobId = `agent-review-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+  const now = Date.now();
+  db.prepare('INSERT INTO "AgentJob" ("id","weekStart","action","status","summary","createdAt","completedAt") VALUES (?,?,?,?,?,?,?)').run(jobId, toMillis(weekStart), "WEEKLY_REVIEW_MAINTAINED", "COMPLETED", String(summary).trim().slice(0, 2000), now, now);
+  printJson({ success: true, jobId, weekStart, maintained: true });
+}
+
 try {
   if (command === "context") printJson(loadContext(requireWeek(flags.week)));
   if (command === "validate-week") {
@@ -279,6 +290,7 @@ try {
   }
   if (command === "publish-week") publishWeek(readPayload(flags.input), requireWeek(flags.week));
   if (command === "reply-chat") replyChat(readPayload(flags.input), flags.id);
+  if (command === "record-review") recordReview(requireWeek(flags.week), flags.summary);
 } finally {
   db.close();
 }

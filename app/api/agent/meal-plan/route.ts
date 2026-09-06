@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 
 type MealPlanRequest = {
   prompt: string;
-  action?: "PUBLISH_WEEK" | "UPDATE_DAY";
+  action?: "PUBLISH_WEEK" | "UPDATE_DAY" | "REVIEW_WEEK";
   date?: string;
   weekStart?: string;
   family?: { name: string; dietaryNotes?: string }[];
@@ -21,7 +21,7 @@ export async function POST(request: Request) {
 
   const requestedAt = new Date();
   const payload = {
-    task: body.action === "UPDATE_DAY" ? "update_meal_day" : "publish_week_recipes",
+    task: body.action === "UPDATE_DAY" ? "update_meal_day" : body.action === "REVIEW_WEEK" ? "review_week_plan" : "publish_week_recipes",
     prompt: body.prompt,
     date: body.date,
     weekStart: body.weekStart,
@@ -42,7 +42,7 @@ export async function POST(request: Request) {
     });
     if (!upstream.ok) return NextResponse.json({ error: "Agent request failed" }, { status: 502 });
     const result = await upstream.json();
-    const job = (body.action === "UPDATE_DAY" || body.action === "PUBLISH_WEEK") && body.weekStart
+    const job = (body.action === "UPDATE_DAY" || body.action === "PUBLISH_WEEK" || body.action === "REVIEW_WEEK") && body.weekStart
       ? await waitForAgentJob(body.weekStart, requestedAt)
       : null;
     const after = body.date ? await readMeal(body.date) : null;
@@ -50,11 +50,12 @@ export async function POST(request: Request) {
     if (job?.status === "FAILED") {
       return NextResponse.json({ error: "Hermes could not publish the meal update", message: "Hermes가 식단 반영에 실패했습니다. Hermes 로그를 확인해 주세요.", upstream: result }, { status: 502 });
     }
-    if ((body.action === "UPDATE_DAY" || body.action === "PUBLISH_WEEK") && !job) {
+    if ((body.action === "UPDATE_DAY" || body.action === "PUBLISH_WEEK" || body.action === "REVIEW_WEEK") && !job) {
       return NextResponse.json({ error: "Meal update was not published", message: "Hermes가 식단을 검토했지만 SQLite에 게시 작업을 완료하지 않았습니다. Hermes 로그에서 mealctl validate-week 및 publish-week 실행 여부를 확인해 주세요.", result: body.date ? { changed: false, before, after } : null, upstream: result }, { status: 502 });
     }
     const message = body.action === "UPDATE_DAY"
       ? changed ? "Hermes가 식단을 수정했습니다." : "Hermes가 검토했지만 이 날짜의 식단은 유지했습니다."
+      : body.action === "REVIEW_WEEK" ? "Hermes가 다음 주 식단을 점검했습니다."
       : "Hermes가 주간 요청을 처리했습니다. 반영 결과는 레시피와 장보기 탭에서 확인하세요.";
     return NextResponse.json({ accepted: true, message, result: body.date ? { changed, before, after } : null, upstream: result });
   }

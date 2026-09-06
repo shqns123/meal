@@ -177,6 +177,18 @@ model AgentChat {
   @@index([createdAt])
 }
 
+model WeeklyReview {
+  id              String   @id @default(cuid())
+  weekStart       DateTime @unique
+  budgetRemaining Int?
+  diningOutPlan   String?
+  wantedFoods     String?
+  avoidFoods      String?
+  note            String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
 enum MealType {
   BREAKFAST
   LUNCH
