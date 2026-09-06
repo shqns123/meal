@@ -180,6 +180,7 @@ model AgentChat {
 model WeeklyReview {
   id              String   @id @default(cuid())
   weekStart       DateTime @unique
+  referenceDate   DateTime?
   budgetRemaining Int?
   diningOutPlan   String?
   wantedFoods     String?

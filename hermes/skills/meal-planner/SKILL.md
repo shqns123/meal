@@ -50,7 +50,7 @@ Only then give a short completion report including the `jobId`. If a terminal co
    node scripts/mealctl.mjs context --week YYYY-MM-DD
    ```
 
-2. Use the returned meals, family schedules, pantry, budget, `weeklyReview`, recipe library, and output contract. The weekly review is the owner's latest budget balance, outside-meal plan, food preferences, and notes. Prioritize ingredients with a near expiry date; do not change the plan merely because long-storage ingredients remain. Do not change the monthly meal plan unless the owner's request explicitly requires it.
+2. Use the returned meals, family schedules, pantry, budget, `weeklyReview`, recipe library, and output contract. The weekly review is the owner's latest budget balance, outside-meal plan, food preferences, and notes. Prioritize ingredients with a near expiry date; do not change the plan merely because long-storage ingredients remain. If `weeklyReview.referenceDate` is later than the Sunday `weekStart`, assess and change only from that reference date through Saturday; preserve earlier dates in the same week. Do not change the monthly meal plan unless the owner's request explicitly requires it.
 3. For every main or side dish, first look for a verified exact-title match in `recipeLibrary`.
    - Reuse a verified library recipe and its checked source when it still matches the planned dish.
    - If the owner explicitly asks to regenerate or distrusts the existing recipes, treat every recipe in the selected week as marked for refresh. Do not reuse its existing source without opening and checking it again; keep the monthly meal plan unchanged unless the owner requests a menu change.

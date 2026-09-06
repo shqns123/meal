@@ -75,7 +75,7 @@ function loadContext(weekStart) {
     meals: mealRows.map((meal) => ({ date: formatKst(meal.date), lunch: meal.lunchPlan, main: meal.mainDish, sides: parseJsonList(meal.sideDishes), baby: meal.babyMenu, note: meal.cookingNote })),
     pantry,
     budgetPeriods,
-    weeklyReview,
+    weeklyReview: weeklyReview ? { ...weeklyReview, weekStart: formatKst(weeklyReview.weekStart), referenceDate: weeklyReview.referenceDate ? formatKst(weeklyReview.referenceDate) : weekStart } : null,
     existingRecipes,
     recipeLibrary,
     outputContract: {
