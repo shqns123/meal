@@ -28,7 +28,7 @@ cd "$MEAL_PLAN_ROOT"
 node scripts/mealctl.mjs context --week YYYY-MM-DD
 ```
 
-Use the returned meals, schedules, family needs, pantry, budget, weekly review, existing recipes, and output contract. Honour `MEAL.md`, including banned ingredients, adult/child split cooking, exact amounts, and blog-source verification.
+Use the returned meals, schedules, family needs, pantry, weekly review, existing recipes, and output contract. `dinnerDiningOut` means the household does not eat dinner at home; `lunchNotAtHome` and `dinnerNotAtHome` mean that family member is absent for that meal. Honour `MEAL.md`, including banned ingredients, adult/child split cooking, exact amounts, and blog-source verification.
 
 ## Recipe source verification: browser first
 
@@ -97,6 +97,8 @@ node scripts/mealctl.mjs rebuild-shopping --week YYYY-MM-DD
 ### `review_week_plan`
 
 - First honour `weeklyReview.referenceDate`: only assess from that date through Saturday.
+- Use saved date-level attendance (`dinnerDiningOut`, `lunchNotAtHome`, and `dinnerNotAtHome`) as the source of truth for dining out and meal portions. Do not expect or request weekly-review budget or free-text outing fields.
+- When `dinnerDiningOut` is true, do not create dinner recipes or shopping items for that date. Keep its calendar record unchanged unless the task explicitly asks to change it.
 - If no change is needed, record the decision:
 
 ```bash

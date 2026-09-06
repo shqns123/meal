@@ -76,7 +76,7 @@ function loadContext(weekStart) {
     rules: { agents: path.join(root, "AGENTS.md"), meal: path.join(root, "MEAL.md") },
     family: db.prepare('SELECT "id","name","role","allergies","chewingAbility","spiceTolerance","dietaryNotes" FROM "FamilyMember" ORDER BY "role"').all(),
     schedules: schedules.map((item) => ({ ...item, date: formatKst(item.date) })),
-    meals: mealRows.map((meal) => ({ date: formatKst(meal.date), lunch: meal.lunchPlan, main: meal.mainDish, sides: parseJsonList(meal.sideDishes), baby: meal.babyMenu, note: meal.cookingNote })),
+    meals: mealRows.map((meal) => ({ date: formatKst(meal.date), lunch: meal.lunchPlan, main: meal.mainDish, sides: parseJsonList(meal.sideDishes), baby: meal.babyMenu, note: meal.cookingNote, dinnerDiningOut: Boolean(meal.dinnerDiningOut) })),
     pantry,
     budgetPeriods,
     weeklyReview: weeklyReview ? { ...weeklyReview, weekStart: formatKst(weeklyReview.weekStart), referenceDate: weeklyReview.referenceDate ? formatKst(weeklyReview.referenceDate) : weekStart } : null,
@@ -101,11 +101,11 @@ function validatePayload(payload, weekStart, scopeDate = null) {
   if (payload?.schemaVersion && payload.schemaVersion !== "meal-week.v1") errors.push("schemaVersion must be meal-week.v1.");
   if (payload?.weekStart !== weekStart) errors.push(`weekStart must be ${weekStart}.`);
   if (!String(payload?.changeReason ?? "").trim()) errors.push("changeReason is required.");
-  if (!Array.isArray(payload?.recipes) || payload.recipes.length === 0) errors.push("recipes must contain at least one recipe.");
+  if (!Array.isArray(payload?.recipes)) errors.push("recipes must be an array.");
 
   const startMs = toMillis(weekStart);
   const endExclusiveMs = toMillis(addDays(weekStart, 7));
-  const plans = db.prepare('SELECT "id","date","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"').all(startMs, endExclusiveMs);
+  const plans = db.prepare('SELECT "id","date","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote","dinnerDiningOut" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"').all(startMs, endExclusiveMs);
   const plansByDate = new Map(plans.map((plan) => [formatKst(plan.date), plan]));
   const changedDates = new Set();
   if (payload.mealChanges !== undefined && !Array.isArray(payload.mealChanges)) errors.push("mealChanges must be an array when provided.");
@@ -171,7 +171,7 @@ function validatePayload(payload, weekStart, scopeDate = null) {
   for (const plan of plans) {
     const date = formatKst(plan.date);
     if (scopeDate && date !== scopeDate) continue;
-    for (const dish of [plan.mainDish, ...parseJsonList(plan.sideDishes)].filter(Boolean)) if (!coverage.has(`${date}|${dish}`)) errors.push(`Missing recipe coverage for ${date}: ${dish}`);
+    if (!plan.dinnerDiningOut) for (const dish of [plan.mainDish, ...parseJsonList(plan.sideDishes)].filter(Boolean)) if (!coverage.has(`${date}|${dish}`)) errors.push(`Missing recipe coverage for ${date}: ${dish}`);
     const day = new Date(`${date}T00:00:00Z`).getUTCDay();
     if ([0, 6].includes(day) && plan.lunchPlan && !plan.lunchPlan.includes("회사 식사")) {
       const hasLunch = (payload.recipes ?? []).some((recipe) => recipe.category === "점심" && recipe.plannedDates?.includes(date));
@@ -250,7 +250,7 @@ function storedRecipes(weekStart, { skipInvalid = false } = {}) {
 
 function missingStoredCoverage(weekStart) {
   const startMs = toMillis(weekStart), endMs = toMillis(addDays(weekStart, 7));
-  const plans = db.prepare('SELECT "date","lunchPlan","mainDish","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"').all(startMs, endMs);
+  const plans = db.prepare('SELECT "date","lunchPlan","mainDish","sideDishes","dinnerDiningOut" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"').all(startMs, endMs);
   const coverage = new Set();
   const allRecipes = storedRecipes(weekStart);
   const recipes = allRecipes.filter((recipe) => !recipe.invalidIngredient);
@@ -258,7 +258,7 @@ function missingStoredCoverage(weekStart) {
   const missing = [];
   for (const plan of plans) {
     const date = formatKst(plan.date);
-    for (const dish of [plan.mainDish, ...parseJsonList(plan.sideDishes)].filter(Boolean)) if (!coverage.has(`${date}|${dish}`)) missing.push(`${date}: ${dish}`);
+    if (!plan.dinnerDiningOut) for (const dish of [plan.mainDish, ...parseJsonList(plan.sideDishes)].filter(Boolean)) if (!coverage.has(`${date}|${dish}`)) missing.push(`${date}: ${dish}`);
     const day = new Date(`${date}T00:00:00Z`).getUTCDay();
     if ([0, 6].includes(day) && plan.lunchPlan && !plan.lunchPlan.includes("회사 식사") && !recipes.some((recipe) => recipe.category === "점심" && recipe.plannedDates.includes(date))) missing.push(`${date}: ${plan.lunchPlan} (점심)`);
   }

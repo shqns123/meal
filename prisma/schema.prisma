@@ -72,6 +72,7 @@ model MealPlan {
   changeReason     String?
   adultServings    Int           @default(2)
   childServings    Int           @default(1)
+  dinnerDiningOut  Boolean       @default(false)
   recipeId         String?
   recipe           Recipe?       @relation(fields: [recipeId], references: [id])
   memberId         String?
@@ -91,6 +92,8 @@ model FamilySchedule {
   isWorking      Boolean      @default(false)
   eatsAtCompany  Boolean      @default(false)
   isAway         Boolean      @default(false)
+  lunchNotAtHome Boolean      @default(false)
+  dinnerNotAtHome Boolean     @default(false)
   note           String?
 
   @@unique([date, memberId])

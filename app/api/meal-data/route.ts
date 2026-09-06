@@ -24,13 +24,17 @@ export async function GET(request: Request) {
       note: meal.cookingNote,
       changeReason: meal.changeReason,
     })),
-    recipes: recipes.map((recipe, index) => ({
+    recipes: recipes.map((recipe, index) => {
+      const isSideDish = recipe.category === "반찬" || recipe.category === "부찬";
+      return {
       id: recipe.id,
-      emoji: recipe.category === "반찬" ? "🥢" : "🍲",
+      emoji: isSideDish ? "🥢" : "🍲",
       color: ["bg-[#ffe0db]", "bg-[#e2f3e9]", "bg-[#fff0d4]"][index % 3],
       title: recipe.title,
       meta: `성인 ${recipe.adultServings}명 · 아기 ${recipe.childServings}명`,
-      tags: [recipe.category, ...(recipe.sourceUrl ? ["블로그 참고"] : []), ...(recipe.needsReview ? ["조리 순서 보완 필요"] : [])],
+      category: isSideDish ? "부찬" : "주찬",
+      plannedDates: recipeDates(recipe.plannedDates, recipe.title, isSideDish, mealPlans, week),
+      tags: [isSideDish ? "부찬" : "주찬", ...(recipe.sourceUrl ? ["블로그 참고"] : []), ...(recipe.needsReview ? ["조리 순서 보완 필요"] : [])],
       sourceUrl: recipe.sourceUrl,
       sourceTitle: recipe.sourceTitle,
       sourceAuthor: recipe.sourceAuthor,
@@ -42,11 +46,28 @@ export async function GET(request: Request) {
       babySplitStep: recipe.babySplitStep,
       storageMethod: recipe.storageMethod,
       consumeWithin: recipe.consumeWithin,
-    })),
+    };
+    }),
     grocery: (shoppingWeek?.items ?? []).map((item) => ({ id: item.id, name: `${item.name} ${item.quantity}${item.unit}`, category: item.category, done: item.purchased, usePlan: item.usePlan })),
   });
 }
 
 function parseList(value: string): string[] {
   try { return JSON.parse(value); } catch { return value.split(",").map((item) => item.trim()).filter(Boolean); }
+}
+
+function recipeDates(storedDates: string, title: string, isSideDish: boolean, mealPlans: { date: Date; mainDish: string | null; sideDishes: string }[], weekStart: string) {
+  const dates = parseList(storedDates).filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date));
+  if (dates.length) return dates.sort();
+  const end = new Date(`${weekStart}T00:00:00+09:00`).getTime() + 7 * 86_400_000;
+  return mealPlans.filter((meal) => {
+    const timestamp = meal.date.getTime();
+    return timestamp >= new Date(`${weekStart}T00:00:00+09:00`).getTime() && timestamp < end && (isSideDish ? parseList(meal.sideDishes).includes(title) : meal.mainDish === title);
+  }).map((meal) => formatKst(meal.date));
+}
+
+function formatKst(date: Date) {
+  const parts = new Intl.DateTimeFormat("en", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value;
+  return `${part("year")}-${part("month")}-${part("day")}`;
 }

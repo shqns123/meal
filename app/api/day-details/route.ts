@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
+type AttendanceUpdate = {
+  lunchNotAtHome?: boolean;
+  dinnerNotAtHome?: boolean;
+};
+
 type ScheduleUpdate = {
   date?: string;
-  isWorking?: boolean;
-  eatsAtCompany?: boolean;
-  isAway?: boolean;
-  note?: string;
+  dinnerDiningOut?: boolean;
+  father?: AttendanceUpdate;
+  mother?: AttendanceUpdate;
 };
 
 export async function GET(request: Request) {
@@ -18,30 +22,42 @@ export async function GET(request: Request) {
 export async function PUT(request: Request) {
   const body = await request.json() as ScheduleUpdate;
   if (!isDate(body.date)) return NextResponse.json({ error: "A valid date is required" }, { status: 400 });
-  const father = await prisma.familyMember.findFirst({ where: { role: "father" } });
-  if (!father) return NextResponse.json({ error: "Father profile was not found" }, { status: 404 });
-
   const date = toDate(body.date);
-  const isWorking = Boolean(body.isWorking);
-  await prisma.familySchedule.upsert({
-    where: { date_memberId: { date, memberId: father.id } },
-    update: { isWorking, eatsAtCompany: isWorking && Boolean(body.eatsAtCompany), isAway: Boolean(body.isAway), note: body.note?.trim() || null },
-    create: { date, memberId: father.id, isWorking, eatsAtCompany: isWorking && Boolean(body.eatsAtCompany), isAway: Boolean(body.isAway), note: body.note?.trim() || null },
-  });
+  const [meal, family] = await Promise.all([
+    prisma.mealPlan.findFirst({ where: { date } }),
+    prisma.familyMember.findMany({ where: { role: { in: ["father", "mother"] } } }),
+  ]);
+  if (!meal) return NextResponse.json({ error: "Meal plan was not found" }, { status: 404 });
+  await prisma.$transaction([
+    prisma.mealPlan.update({ where: { id: meal.id }, data: { dinnerDiningOut: Boolean(body.dinnerDiningOut) } }),
+    ...family.map((member) => {
+      const attendance = member.role === "father" ? body.father : body.mother;
+      return prisma.familySchedule.upsert({
+        where: { date_memberId: { date, memberId: member.id } },
+        update: { lunchNotAtHome: Boolean(attendance?.lunchNotAtHome), dinnerNotAtHome: Boolean(attendance?.dinnerNotAtHome) },
+        create: { date, memberId: member.id, lunchNotAtHome: Boolean(attendance?.lunchNotAtHome), dinnerNotAtHome: Boolean(attendance?.dinnerNotAtHome) },
+      });
+    }),
+  ]);
   return NextResponse.json(await loadDay(body.date));
 }
 
 async function loadDay(dateText: string) {
   const date = toDate(dateText);
-  const [meal, father] = await Promise.all([
+  const [meal, family] = await Promise.all([
     prisma.mealPlan.findFirst({ where: { date } }),
-    prisma.familyMember.findFirst({ where: { role: "father" } }),
+    prisma.familyMember.findMany({ where: { role: { in: ["father", "mother"] } } }),
   ]);
-  const schedule = father ? await prisma.familySchedule.findUnique({ where: { date_memberId: { date, memberId: father.id } } }) : null;
+  const schedules = await prisma.familySchedule.findMany({ where: { date, memberId: { in: family.map((member) => member.id) } } });
+  const attendanceFor = (role: string) => {
+    const member = family.find((item) => item.role === role);
+    const schedule = schedules.find((item) => item.memberId === member?.id);
+    return { lunchNotAtHome: schedule?.lunchNotAtHome ?? false, dinnerNotAtHome: schedule?.dinnerNotAtHome ?? false };
+  };
   return {
     date: dateText,
-    meal: meal && { lunch: meal.lunchPlan, main: meal.mainDish, sides: parseList(meal.sideDishes), baby: meal.babyMenu, note: meal.cookingNote },
-    fatherSchedule: { isWorking: schedule?.isWorking ?? false, eatsAtCompany: schedule?.eatsAtCompany ?? false, isAway: schedule?.isAway ?? false, note: schedule?.note ?? "" },
+    meal: meal && { lunch: meal.lunchPlan, main: meal.mainDish, sides: parseList(meal.sideDishes), baby: meal.babyMenu, note: meal.cookingNote, dinnerDiningOut: meal.dinnerDiningOut },
+    attendance: { father: attendanceFor("father"), mother: attendanceFor("mother") },
   };
 }
 

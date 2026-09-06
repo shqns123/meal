@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
 type PantryDraft = { name?: string; quantity?: number; unit?: string; category?: string; expiresAt?: string | null };
-type ReviewRequest = { referenceDate?: string; budgetRemaining?: number | null; diningOutPlan?: string; wantedFoods?: string; avoidFoods?: string; note?: string; pantry?: PantryDraft[] };
+type ReviewRequest = { referenceDate?: string; wantedFoods?: string; avoidFoods?: string; note?: string; pantry?: PantryDraft[] };
 
 function validWeek(week?: string) { return /^\d{4}-\d{2}-\d{2}$/.test(week ?? "") && new Date(`${week}T00:00:00Z`).getUTCDay() === 0; }
 function addDays(date: string, days: number) { const value = new Date(`${date}T00:00:00Z`); value.setUTCDate(value.getUTCDate() + days); return value.toISOString().slice(0, 10); }
@@ -30,12 +30,10 @@ export async function POST(request: Request) {
   if (!validDate(body.referenceDate)) return NextResponse.json({ error: "referenceDate must be in YYYY-MM-DD format" }, { status: 400 });
   const referenceDate = body.referenceDate!;
   const weekStart = sundayFor(referenceDate);
-  const budgetRemaining = body.budgetRemaining === null || body.budgetRemaining === undefined ? null : Number(body.budgetRemaining);
-  if (budgetRemaining !== null && (!Number.isInteger(budgetRemaining) || budgetRemaining < 0 || budgetRemaining > 10_000_000)) return NextResponse.json({ error: "budgetRemaining must be a valid non-negative amount" }, { status: 400 });
   const pantry = (body.pantry ?? []).filter((item) => item.name?.trim());
   if (pantry.some((item) => !item.unit?.trim() || !(Number(item.quantity) >= 0))) return NextResponse.json({ error: "Each pantry item needs a name, quantity, and unit" }, { status: 400 });
   await prisma.$transaction(async (tx) => {
-    await tx.weeklyReview.upsert({ where: { weekStart: new Date(`${weekStart}T00:00:00+09:00`) }, create: { weekStart: new Date(`${weekStart}T00:00:00+09:00`), referenceDate: new Date(`${referenceDate}T00:00:00+09:00`), budgetRemaining, diningOutPlan: body.diningOutPlan?.trim() || null, wantedFoods: body.wantedFoods?.trim() || null, avoidFoods: body.avoidFoods?.trim() || null, note: body.note?.trim() || null }, update: { referenceDate: new Date(`${referenceDate}T00:00:00+09:00`), budgetRemaining, diningOutPlan: body.diningOutPlan?.trim() || null, wantedFoods: body.wantedFoods?.trim() || null, avoidFoods: body.avoidFoods?.trim() || null, note: body.note?.trim() || null } });
+    await tx.weeklyReview.upsert({ where: { weekStart: new Date(`${weekStart}T00:00:00+09:00`) }, create: { weekStart: new Date(`${weekStart}T00:00:00+09:00`), referenceDate: new Date(`${referenceDate}T00:00:00+09:00`), wantedFoods: body.wantedFoods?.trim() || null, avoidFoods: body.avoidFoods?.trim() || null, note: body.note?.trim() || null }, update: { referenceDate: new Date(`${referenceDate}T00:00:00+09:00`), budgetRemaining: null, diningOutPlan: null, wantedFoods: body.wantedFoods?.trim() || null, avoidFoods: body.avoidFoods?.trim() || null, note: body.note?.trim() || null } });
     for (const item of pantry) await tx.pantryItem.upsert({ where: { name: item.name!.trim() }, create: { name: item.name!.trim(), quantity: Number(item.quantity), unit: item.unit!.trim(), category: item.category?.trim() || "기타", expiresAt: item.expiresAt ? new Date(`${item.expiresAt}T00:00:00+09:00`) : null }, update: { quantity: Number(item.quantity), unit: item.unit!.trim(), category: item.category?.trim() || "기타", expiresAt: item.expiresAt ? new Date(`${item.expiresAt}T00:00:00+09:00`) : null } });
   });
   return NextResponse.json({ success: true });
