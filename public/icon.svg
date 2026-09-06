@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="우리집 식탁">
+  <rect width="512" height="512" rx="120" fill="#ffb110"/>
+  <g fill="none" stroke="#5f4300" stroke-linecap="round" stroke-linejoin="round" stroke-width="30">
+    <path d="M132 92v110M176 92v110M220 92v110M132 202c0 31 20 54 44 54s44-23 44-54M176 256v164"/>
+    <path d="M350 92v150c0 35-25 61-57 61h-6V92h6c32 0 57 26 57 61Z"/>
+    <path d="M293 303v117"/>
+  </g>
+</svg>

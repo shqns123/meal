@@ -3,6 +3,8 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification(data.title || "우리집 식탁", {
       body: data.body || "AI 작업이 완료되었습니다.",
+      icon: "/icon.svg",
+      badge: "/icon.svg",
       tag: data.tag || "meal-notification",
       data: { url: data.url || "/" },
     }),

@@ -10,6 +10,7 @@ import {
   ChevronRight,
   ExternalLink,
   LoaderCircle,
+  LogOut,
   Menu,
   MessageCircle,
   Pencil,
@@ -179,6 +180,11 @@ export default function Home() {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [dataWeek, selectedMonth, refreshVersion]);
+
+  useEffect(() => {
+    if (window.isSecureContext && "serviceWorker" in navigator)
+      void navigator.serviceWorker.register("/push-worker.js");
+  }, []);
 
   useEffect(() => {
     try {
@@ -363,6 +369,19 @@ export default function Home() {
               <span className="text-sm font-medium">우진 님</span>
             )}
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              void fetch("/api/auth/logout", { method: "POST" }).finally(() =>
+                window.location.assign("/login"),
+              );
+            }}
+            title={sidebarCollapsed ? "로그아웃" : undefined}
+            className={`mt-2 flex h-10 w-full items-center rounded-xl text-black/50 transition-colors hover:bg-[#f6f5f4] hover:text-black focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${sidebarCollapsed ? "justify-center" : "gap-2 px-3"}`}
+          >
+            <LogOut size={17} />
+            {!sidebarCollapsed && <span className="text-sm font-medium">로그아웃</span>}
+          </button>
         </div>
       </aside>
       <section
