@@ -1,27 +1,104 @@
 @import "tailwindcss";
 
-:root { --paper: #f6f5f4; --ink: #111111; --blue: #0075de; --line: rgba(0,0,0,.08); }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--paper); color: var(--ink); font-family: Arial, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
-button { font: inherit; }
-::selection { background: #cfe8ff; }
-.editorial { font-family: Georgia, "Noto Serif KR", serif; }
-.sidebar-link { display: flex; align-items: center; gap: 10px; width: 100%; border-radius: 8px; padding: 10px 12px; color: rgba(0,0,0,.58); font-size: 14px; font-weight: 500; transition: .2s ease; }
-.sidebar-link:hover { color: #111; background: rgba(0,0,0,.04); }
-.sidebar-link.active { background: #e6f3fe; color: #0075de; }
-.calendar-cell { min-height: 136px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 10px; }
-.calendar-cell:nth-child(7n) { border-right: 0; }
-.mobile-sidebar-backdrop { transition: opacity 280ms ease-out; }
+:root {
+  --paper: #f6f5f4;
+  --ink: #111111;
+  --blue: #0075de;
+  --line: rgba(0, 0, 0, 0.08);
+  --muted: rgba(0, 0, 0, 0.6);
+  --focus: rgba(0, 117, 222, 0.4);
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family:
+    "Pretendard Variable",
+    Pretendard,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "Apple SD Gothic Neo",
+    "Noto Sans KR",
+    sans-serif;
+}
+button {
+  font: inherit;
+}
+::selection {
+  background: #cfe8ff;
+}
+*:focus-visible {
+  outline-color: var(--blue);
+  outline-offset: 2px;
+}
+* {
+  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+  scrollbar-width: thin;
+}
+.editorial {
+  font-family: Georgia, "Noto Serif KR", serif;
+}
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: rgba(0, 0, 0, 0.58);
+  font-size: 14px;
+  font-weight: 500;
+  transition: 0.2s ease;
+}
+.sidebar-link:hover {
+  color: #111;
+  background: rgba(0, 0, 0, 0.04);
+}
+.sidebar-link.active {
+  background: #e6f3fe;
+  color: #0075de;
+}
+.calendar-cell {
+  min-height: 136px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 10px;
+}
+.calendar-cell:nth-child(7n) {
+  border-right: 0;
+}
+.mobile-sidebar-backdrop {
+  transition: opacity 280ms ease-out;
+}
 @media (max-width: 1023px) {
-  .calendar-cell { min-height: 136px; padding: 10px; }
-  .app-sidebar { transform: translate3d(-100%, 0, 0); transition: transform 360ms cubic-bezier(.22, 1, .36, 1); will-change: transform; }
-  .app-sidebar[data-mobile-open="true"] { transform: translate3d(0, 0, 0); }
+  .calendar-cell {
+    min-height: 136px;
+    padding: 10px;
+  }
+  .app-sidebar {
+    transform: translate3d(-100%, 0, 0);
+    transition: transform 360ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .app-sidebar[data-mobile-open="true"] {
+    transform: translate3d(0, 0, 0);
+    will-change: transform;
+  }
 }
 
 @media (hover: none) {
-  .sidebar-link:active, button:active { background-color: rgba(0, 0, 0, .06); }
+  .sidebar-link:active,
+  button:active {
+    background-color: rgba(0, 0, 0, 0.06);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .app-sidebar, .mobile-sidebar-backdrop { transition-duration: 1ms; }
+  .app-sidebar,
+  .mobile-sidebar-backdrop {
+    transition-duration: 1ms;
+  }
 }

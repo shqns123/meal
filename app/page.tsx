@@ -1,28 +1,129 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, ExternalLink, LoaderCircle, Menu, MessageCircle, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Send, Settings, ShoppingBasket, Sparkles, Trash2, UsersRound, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  BookOpen,
+  CalendarDays,
+  Check,
+  ChefHat,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  LoaderCircle,
+  Menu,
+  MessageCircle,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Send,
+  Settings,
+  ShoppingBasket,
+  Sparkles,
+  Trash2,
+  UtensilsCrossed,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Dialog } from "@/components/ui/dialog";
 
-type Meal = { day: number; main: string; sides: string[]; type: string; color: string };
-type Recipe = { id: number | string; emoji: string; color: string; title: string; meta: string; category: "주찬" | "부찬"; plannedDates: string[]; tags: string[]; sourceUrl?: string | null; sourceTitle?: string | null; sourceAuthor?: string | null; description?: string | null; prepMinutes?: number; cookMinutes?: number; instructions?: string[]; ingredients?: { name: string; amount: string; category: string }[]; babySplitStep?: string | null; storageMethod?: string | null; consumeWithin?: string | null };
-type Grocery = { id: number | string; name: string; category: string; done: boolean };
-type AgentRequest = { prompt: string; action: "PUBLISH_WEEK" | "UPDATE_DAY" | "REVIEW_WEEK" | "REGENERATE_RECIPES" | "REGENERATE_GROCERY"; date?: string; weekStart?: string };
-type MealSnapshot = { date: string; lunch?: string | null; main: string; sides: string[]; baby?: string | null; note?: string | null; changeReason?: string | null };
-type DayUpdateResult = { changed: boolean; before: MealSnapshot | null; after: MealSnapshot | null };
+type Meal = {
+  date: string;
+  day: number;
+  main: string;
+  sides: string[];
+  type: string;
+  color: string;
+};
+type Recipe = {
+  id: number | string;
+  color: string;
+  title: string;
+  meta: string;
+  category: "주찬" | "부찬";
+  plannedDates: string[];
+  tags: string[];
+  sourceUrl?: string | null;
+  sourceTitle?: string | null;
+  sourceAuthor?: string | null;
+  description?: string | null;
+  prepMinutes?: number;
+  cookMinutes?: number;
+  instructions?: string[];
+  ingredients?: { name: string; amount: string; category: string }[];
+  babySplitStep?: string | null;
+  storageMethod?: string | null;
+  consumeWithin?: string | null;
+};
+type Grocery = {
+  id: number | string;
+  name: string;
+  category: string;
+  done: boolean;
+};
+type AgentRequest = {
+  prompt: string;
+  action:
+    | "PUBLISH_WEEK"
+    | "UPDATE_DAY"
+    | "REVIEW_WEEK"
+    | "REGENERATE_RECIPES"
+    | "REGENERATE_GROCERY";
+  date?: string;
+  weekStart?: string;
+};
+type MealSnapshot = {
+  date: string;
+  lunch?: string | null;
+  main: string;
+  sides: string[];
+  baby?: string | null;
+  note?: string | null;
+  changeReason?: string | null;
+};
+type DayUpdateResult = {
+  changed: boolean;
+  before: MealSnapshot | null;
+  after: MealSnapshot | null;
+};
 type Attendance = { lunchNotAtHome: boolean; dinnerNotAtHome: boolean };
-type DayDetail = { date: string; meal: { lunch?: string | null; main?: string | null; sides: string[]; baby?: string | null; note?: string | null; dinnerDiningOut: boolean } | null; attendance: { father: Attendance; mother: Attendance } };
-type ChatMessage = { role: "user" | "assistant"; content: string; sources?: { title?: string; url: string }[] };
-type WeeklyReviewRequest = { weekStart: string; referenceDate: string; prompt: string };
-const nav = [[CalendarDays, "이 달의 식단"], [BookOpen, "레시피"], [ShoppingBasket, "장보기"], [UsersRound, "우리 가족"]] as const;
+type DayDetail = {
+  date: string;
+  meal: {
+    lunch?: string | null;
+    main?: string | null;
+    sides: string[];
+    baby?: string | null;
+    note?: string | null;
+    dinnerDiningOut: boolean;
+  } | null;
+  attendance: { father: Attendance; mother: Attendance };
+};
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  sources?: { title?: string; url: string }[];
+};
+type WeeklyReviewRequest = {
+  weekStart: string;
+  referenceDate: string;
+  prompt: string;
+};
+const nav = [
+  [CalendarDays, "이 달의 식단"],
+  [BookOpen, "레시피"],
+  [ShoppingBasket, "장보기"],
+] as const;
 const seedMeals: Meal[] = [];
 const seedRecipes: Recipe[] = [];
 const seedGrocery: Grocery[] = [];
 
 export default function Home() {
   const [view, setView] = useState<"month" | "week">("month");
-  const [active, setActive] = useState<(typeof nav)[number][1] | "주간 점검">("이 달의 식단");
+  const [active, setActive] = useState<(typeof nav)[number][1] | "주간 점검">(
+    "이 달의 식단",
+  );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [agentRequest, setAgentRequest] = useState<AgentRequest | null>(null);
@@ -31,158 +132,2079 @@ export default function Home() {
   const [mealItems, setMealItems] = useState(seedMeals);
   const [recipes, setRecipes] = useState(seedRecipes);
   const [grocery, setGrocery] = useState(seedGrocery);
-  const [selectedMonth, setSelectedMonth] = useState("2026-09");
-  const [selectedWeek] = useState(() => sundayFor());
+  const [selectedMonth, setSelectedMonth] = useState(() =>
+    currentKstDate().slice(0, 7),
+  );
+  const [selectedWeek, setSelectedWeek] = useState(() =>
+    sundayFor(currentKstDate()),
+  );
   const [refreshVersion, setRefreshVersion] = useState(0);
 
   useEffect(() => {
-    const load = () => fetch(`/api/meal-data?month=${selectedMonth}&week=${selectedWeek}`)
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error("식단을 불러오지 못했습니다.")))
-      .then((data) => { setMealItems(data.meals ?? []); setRecipes(data.recipes ?? []); setGrocery(data.grocery ?? []); })
-      .catch(() => { setMealItems([]); setRecipes([]); setGrocery([]); });
+    const load = () =>
+      fetch(`/api/meal-data?month=${selectedMonth}&week=${selectedWeek}`)
+        .then((response) =>
+          response.ok
+            ? response.json()
+            : Promise.reject(new Error("식단을 불러오지 못했습니다.")),
+        )
+        .then((data) => {
+          setMealItems(data.meals ?? []);
+          setRecipes(data.recipes ?? []);
+          setGrocery(data.grocery ?? []);
+        })
+        .catch(() => {
+          setMealItems([]);
+          setRecipes([]);
+          setGrocery([]);
+        });
     load();
-    const timer = window.setInterval(load, 30_000);
-    return () => window.clearInterval(timer);
+    const onFocus = () => load();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [selectedMonth, selectedWeek, refreshVersion]);
+
+  const openDay = (date: string) => {
+    setSelectedWeek(sundayFor(date));
+    setSelectedDate(date);
+  };
+  const changeMonth = (amount: number) => {
+    const next = shiftMonth(selectedMonth, amount);
+    setSelectedMonth(next);
+    setSelectedWeek(sundayFor(`${next}-01`));
+  };
+  const changeWeek = (amount: number) => {
+    const next = addDaysLocal(selectedWeek, amount * 7);
+    setSelectedWeek(next);
+    setSelectedMonth(addDaysLocal(next, 3).slice(0, 7));
+  };
 
   return (
     <main className="min-h-screen lg:flex">
       <header className="fixed inset-x-0 top-0 z-30 flex h-16 items-center justify-between border-b border-black/[.08] bg-[#f6f5f4]/95 px-5 backdrop-blur lg:hidden">
-        <div className="flex items-center gap-2.5"><div className="grid h-8 w-8 place-items-center rounded-lg bg-[#ffb110] text-base">🍽️</div><span className="text-sm font-semibold">우리집 식탁</span></div>
-        <button type="button" onClick={() => setMobileNavOpen(true)} className="grid h-11 w-11 place-items-center rounded-lg text-black/65 transition-transform duration-200 hover:bg-black/[.05] active:scale-95 focus:outline-none focus:ring-2 focus:ring-[#0075de]/40" aria-label="메뉴 열기"><Menu size={22}/></button>
-      </header>
-      <button type="button" className={`mobile-sidebar-backdrop fixed inset-0 z-30 block bg-black/25 lg:hidden ${mobileNavOpen ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"}`} onClick={() => setMobileNavOpen(false)} aria-label="메뉴 닫기"/>
-      <aside data-mobile-open={mobileNavOpen} className={`app-sidebar fixed inset-y-0 z-40 w-[252px] border-r border-black/[.08] bg-white px-4 py-5 shadow-xl lg:translate-x-0 lg:shadow-none ${sidebarCollapsed ? "lg:w-[72px] lg:px-3" : "lg:w-[252px] lg:px-4"}`}>
-        <div className={`mb-9 flex ${sidebarCollapsed ? "flex-col items-center gap-2" : "items-center justify-between px-2"}`}>
-          <div className="flex items-center gap-3"><div className="grid h-9 w-9 place-items-center rounded-xl bg-[#ffb110] text-xl">🍽️</div>{!sidebarCollapsed && <div><p className="text-[15px] font-semibold">우리집 식탁</p><p className="text-xs text-black/45">우리 세 식구</p></div>}</div>
-          <button type="button" onClick={() => setMobileNavOpen(false)} className="grid h-11 w-11 place-items-center rounded-lg text-black/45 hover:bg-black/[.05] lg:hidden" aria-label="메뉴 닫기"><X size={20}/></button>
-          <button type="button" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} className="hidden h-9 w-9 shrink-0 place-items-center rounded-lg text-black/45 transition-colors hover:bg-black/[.05] hover:text-black focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 lg:grid" aria-label={sidebarCollapsed ? "사이드바 펼치기" : "사이드바 접기"}>{sidebarCollapsed ? <ChevronRight size={16}/> : <ChevronLeft size={16}/>}</button>
+        <div className="flex items-center gap-2.5">
+          <div className="grid h-8 w-8 place-items-center rounded-lg bg-[#ffb110] text-[#5f4300]">
+            <UtensilsCrossed size={17} />
+          </div>
+          <span className="text-sm font-semibold">우리집 식탁</span>
         </div>
-        <div className="space-y-1">{nav.map(([Icon, label]) => <button key={label} onClick={() => { setActive(label); setMobileNavOpen(false); }} title={sidebarCollapsed ? label : undefined} className={`sidebar-link ${active === label ? "active" : ""} ${sidebarCollapsed ? "justify-center px-0" : ""}`}><Icon size={18}/>{!sidebarCollapsed && label}</button>)}</div>
-        <div className={`absolute bottom-5 ${sidebarCollapsed ? "left-3 right-3" : "left-4 right-4"}`}><button type="button" onClick={() => { setActive("주간 점검"); setMobileNavOpen(false); }} title={sidebarCollapsed ? "주간 점검 설정" : undefined} className={`mb-2 flex h-11 w-full items-center rounded-xl border border-black/[.08] bg-white text-black/60 transition-colors hover:bg-[#f6f5f4] hover:text-black focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${sidebarCollapsed ? "justify-center" : "gap-2 px-3"}`}><Settings size={18}/>{!sidebarCollapsed && <span className="text-sm font-medium">주간 점검 설정</span>}</button><button type="button" onClick={() => { setChatOpen(true); setMobileNavOpen(false); }} title={sidebarCollapsed ? "AI에게 물어보기" : undefined} className={`mb-2 flex h-11 w-full items-center rounded-xl bg-[#0d1247] text-white shadow-sm transition-colors hover:bg-[#171e62] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${sidebarCollapsed ? "justify-center" : "gap-2 px-3"}`}><MessageCircle size={18}/>{!sidebarCollapsed && <span className="text-sm font-medium">AI에게 물어보기</span>}</button><div className={`flex items-center rounded-xl bg-[#f6f5f4] p-3 ${sidebarCollapsed ? "justify-center" : "gap-2"}`}><span className="grid h-7 w-7 place-items-center rounded-full bg-[#0975de] text-xs text-white">우</span>{!sidebarCollapsed && <><span className="text-sm font-medium">우진 님</span><MoreHorizontal className="ml-auto text-black/40" size={17}/></>}</div></div>
+        <button
+          type="button"
+          onClick={() => setMobileNavOpen(true)}
+          className="grid h-11 w-11 place-items-center rounded-lg text-black/65 transition-transform duration-200 hover:bg-black/[.05] active:scale-95 focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+          aria-label="메뉴 열기"
+        >
+          <Menu size={22} />
+        </button>
+      </header>
+      <button
+        type="button"
+        className={`mobile-sidebar-backdrop fixed inset-0 z-30 block bg-black/25 lg:hidden ${mobileNavOpen ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"}`}
+        onClick={() => setMobileNavOpen(false)}
+        aria-label="메뉴 닫기"
+      />
+      <aside
+        data-mobile-open={mobileNavOpen}
+        className={`app-sidebar fixed inset-y-0 z-40 w-[252px] border-r border-black/[.08] bg-white px-4 py-5 shadow-xl lg:translate-x-0 lg:shadow-none ${sidebarCollapsed ? "lg:w-[72px] lg:px-3" : "lg:w-[252px] lg:px-4"}`}
+      >
+        <div
+          className={`mb-9 flex ${sidebarCollapsed ? "flex-col items-center gap-2" : "items-center justify-between px-2"}`}
+        >
+          <div className="flex items-center gap-3">
+            <div className="grid h-9 w-9 place-items-center rounded-xl bg-[#ffb110] text-[#5f4300]">
+              <UtensilsCrossed size={19} />
+            </div>
+            {!sidebarCollapsed && (
+              <div>
+                <p className="text-[15px] font-semibold">우리집 식탁</p>
+                <p className="text-xs text-black/55">우리 세 식구</p>
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setMobileNavOpen(false)}
+            className="grid h-11 w-11 place-items-center rounded-lg text-black/45 hover:bg-black/[.05] lg:hidden"
+            aria-label="메뉴 닫기"
+          >
+            <X size={20} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+            className="hidden h-9 w-9 shrink-0 place-items-center rounded-lg text-black/45 transition-colors hover:bg-black/[.05] hover:text-black focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 lg:grid"
+            aria-label={sidebarCollapsed ? "사이드바 펼치기" : "사이드바 접기"}
+          >
+            {sidebarCollapsed ? (
+              <ChevronRight size={16} />
+            ) : (
+              <ChevronLeft size={16} />
+            )}
+          </button>
+        </div>
+        <div className="space-y-1">
+          {nav.map(([Icon, label]) => (
+            <button
+              key={label}
+              onClick={() => {
+                setActive(label);
+                setMobileNavOpen(false);
+              }}
+              title={sidebarCollapsed ? label : undefined}
+              className={`sidebar-link ${active === label ? "active" : ""} ${sidebarCollapsed ? "justify-center px-0" : ""}`}
+            >
+              <Icon size={18} />
+              {!sidebarCollapsed && label}
+            </button>
+          ))}
+        </div>
+        <div
+          className={`absolute bottom-5 ${sidebarCollapsed ? "left-3 right-3" : "left-4 right-4"}`}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setActive("주간 점검");
+              setMobileNavOpen(false);
+            }}
+            title={sidebarCollapsed ? "주간 점검 설정" : undefined}
+            className={`mb-2 flex h-11 w-full items-center rounded-xl border border-black/[.08] bg-white text-black/60 transition-colors hover:bg-[#f6f5f4] hover:text-black focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${sidebarCollapsed ? "justify-center" : "gap-2 px-3"}`}
+          >
+            <Settings size={18} />
+            {!sidebarCollapsed && (
+              <span className="text-sm font-medium">주간 점검 설정</span>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setChatOpen(true);
+              setMobileNavOpen(false);
+            }}
+            title={sidebarCollapsed ? "AI에게 물어보기" : undefined}
+            className={`mb-2 flex h-11 w-full items-center rounded-xl bg-[#0d1247] text-white transition-colors hover:bg-[#171e62] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${sidebarCollapsed ? "justify-center" : "gap-2 px-3"}`}
+          >
+            <MessageCircle size={18} />
+            {!sidebarCollapsed && (
+              <span className="text-sm font-medium">AI에게 물어보기</span>
+            )}
+          </button>
+          <div
+            className={`flex items-center rounded-xl bg-[#f6f5f4] p-3 ${sidebarCollapsed ? "justify-center" : "gap-2"}`}
+          >
+            <span className="grid h-7 w-7 place-items-center rounded-full bg-[#0975de] text-xs text-white">
+              우
+            </span>
+            {!sidebarCollapsed && (
+              <span className="text-sm font-medium">우진 님</span>
+            )}
+          </div>
+        </div>
       </aside>
-      <section className={`min-w-0 flex-1 pt-16 transition-[margin] duration-200 lg:pt-0 ${sidebarCollapsed ? "lg:ml-[72px]" : "lg:ml-[252px]"}`}><div className="mx-auto max-w-[1440px] p-5 md:p-9">
-        {active === "이 달의 식단" && <MealPlanner view={view} setView={setView} month={selectedMonth} onChangeMonth={(amount) => setSelectedMonth((current) => shiftMonth(current, amount))} meals={mealItems} onOpenDay={setSelectedDate} onEditDay={(date) => setAgentRequest({ action: "UPDATE_DAY", date, weekStart: sundayFor(date), prompt: `${date.slice(8)}일 식단만 가족 일정과 보유 재료에 맞게 수정해줘. 변경한 날짜의 주찬·부찬(주말이면 점심 포함) 레시피와 장보기만 검증 후 반영하고, 다른 날짜의 메뉴·레시피는 건드리지 마.` })}/>}
-        {active === "레시피" && <Recipes recipes={recipes} setRecipes={setRecipes} weekStart={selectedWeek} onRegenerate={() => setAgentRequest({ action: "REGENERATE_RECIPES", weekStart: selectedWeek, prompt: "오늘 날짜가 속한 주차의 식단 메뉴는 변경하지 말고, 그 주의 주찬·부찬·필요한 주말 점심 레시피만 새로 생성해줘. 해당 주차에 속하지 않는 기존 레시피는 삭제하고, 각 메뉴마다 실제로 확인한 블로그 원문을 근거로 정확한 분량, 번호 조리 순서, 아기 분리 조리, 보관 방법을 작성해 전체 주차 검증 후 게시해줘. 장보기는 이 요청에서 변경하지 마." })}/>}
-        {active === "장보기" && <GroceryList grocery={grocery} setGrocery={setGrocery} weekStart={selectedWeek} onRegenerate={() => setAgentRequest({ action: "REGENERATE_GROCERY", weekStart: selectedWeek, prompt: "오늘 날짜가 속한 주차의 메뉴와 레시피는 변경하지 말고, 이미 저장되어 있고 검증된 주간 레시피를 합산해 장보기만 다시 계산해줘. 보유 재료와 기본 양념을 차감하고, 레시피가 빠진 메뉴가 있으면 임의로 생성하지 말고 실패 사유를 알려줘." })}/>}
-        {active === "우리 가족" && <Family/>}
-        {active === "주간 점검" && <WeeklyReviewSettings onRequest={(request) => setAgentRequest({ action: "REVIEW_WEEK", weekStart: request.weekStart, prompt: request.prompt })}/>}
-      </div></section>
-      {selectedDate && <DayDetailModal date={selectedDate} close={() => setSelectedDate(null)}/>}
-      {agentRequest && <AgentModal request={agentRequest} close={() => setAgentRequest(null)} onPublished={() => setRefreshVersion((version) => version + 1)}/>}
-      {chatOpen && <ChatModal close={() => setChatOpen(false)}/>}
+      <section
+        className={`min-w-0 flex-1 pt-16 transition-[margin] duration-200 lg:pt-0 ${sidebarCollapsed ? "lg:ml-[72px]" : "lg:ml-[252px]"}`}
+      >
+        <div className="mx-auto max-w-[1440px] p-5 md:p-9">
+          {active === "이 달의 식단" && (
+            <MealPlanner
+              view={view}
+              setView={setView}
+              month={selectedMonth}
+              weekStart={selectedWeek}
+              onChangeMonth={changeMonth}
+              onChangeWeek={changeWeek}
+              meals={mealItems}
+              onOpenDay={openDay}
+              onEditDay={(date) => {
+                setSelectedWeek(sundayFor(date));
+                setAgentRequest({
+                  action: "UPDATE_DAY",
+                  date,
+                  weekStart: sundayFor(date),
+                  prompt: `${date} 식단만 날짜 상세의 식사 여부와 보유 재료에 맞게 검토해줘. 변경이 필요하면 그 날짜의 주찬·부찬(주말이면 점심 포함) 레시피와 장보기만 검증 후 반영하고, 다른 날짜는 건드리지 마.`,
+                });
+              }}
+            />
+          )}
+          {active === "레시피" && (
+            <Recipes
+              recipes={recipes}
+              weekStart={selectedWeek}
+              onChangeWeek={changeWeek}
+              onRegenerate={() =>
+                setAgentRequest({
+                  action: "REGENERATE_RECIPES",
+                  weekStart: selectedWeek,
+                  prompt: `${selectedWeek}부터 ${addDaysLocal(selectedWeek, 6)}까지의 식단 메뉴는 변경하지 말고, 이 주차의 주찬·부찬·필요한 주말 점심 레시피만 새로 생성해줘. 해당 주차에 속하지 않는 기존 레시피는 건드리지 말고, 각 메뉴마다 실제로 확인한 블로그 원문을 근거로 정확한 분량, 번호 조리 순서, 아기 분리 조리, 보관 방법을 작성해 전체 주차 검증 후 게시해줘. 장보기는 이 요청에서 변경하지 마.`,
+                })
+              }
+            />
+          )}
+          {active === "장보기" && (
+            <GroceryList
+              grocery={grocery}
+              setGrocery={setGrocery}
+              weekStart={selectedWeek}
+              onChangeWeek={changeWeek}
+              onChanged={() => setRefreshVersion((version) => version + 1)}
+              onRegenerate={() =>
+                setAgentRequest({
+                  action: "REGENERATE_GROCERY",
+                  weekStart: selectedWeek,
+                  prompt: `${selectedWeek}부터 ${addDaysLocal(selectedWeek, 6)}까지의 메뉴와 레시피는 변경하지 말고, 이미 저장되어 있고 검증된 이 주차 레시피를 합산해 장보기만 다시 계산해줘. 보유 재료와 기본 양념을 차감하고, 레시피가 빠진 메뉴가 있으면 임의로 생성하지 말고 실패 사유를 알려줘.`,
+                })
+              }
+            />
+          )}
+          {active === "주간 점검" && (
+            <WeeklyReviewSettings
+              onRequest={(request) =>
+                setAgentRequest({
+                  action: "REVIEW_WEEK",
+                  weekStart: request.weekStart,
+                  prompt: request.prompt,
+                })
+              }
+            />
+          )}
+        </div>
+      </section>
+      {selectedDate && (
+        <DayDetailModal
+          date={selectedDate}
+          close={() => setSelectedDate(null)}
+        />
+      )}
+      {agentRequest && (
+        <AgentModal
+          request={agentRequest}
+          close={() => setAgentRequest(null)}
+          onPublished={() => setRefreshVersion((version) => version + 1)}
+        />
+      )}
+      {chatOpen && <ChatModal close={() => setChatOpen(false)} />}
     </main>
   );
 }
 
-function PageTitle({ label, title, children }: { label: string; title: string; children?: React.ReactNode }) { return <div className="mb-6 flex flex-wrap items-end justify-between gap-4"><div><p className="mb-1 text-sm text-black/45">{label}</p><h1 className="text-[28px] font-semibold tracking-[-.035em] md:text-[32px]">{title}</h1></div>{children}</div>; }
-function MealPlanner({ view, setView, month, onChangeMonth, meals, onOpenDay, onEditDay }: { view: "month" | "week"; setView: (v: "month" | "week") => void; month: string; onChangeMonth: (amount: number) => void; meals: Meal[]; onOpenDay: (date: string) => void; onEditDay: (date: string) => void }) { const weekDays = buildMonthDays(month).slice(0, 7); return <><PageTitle label="식단 플래너" title={`${month.slice(5)}월의 식단`}><div className="flex rounded-lg border border-black/[.08] bg-white p-1"><button onClick={() => setView("month")} className={`rounded-md px-3 py-1.5 text-sm ${view === "month" ? "bg-[#e6f3fe] text-[#0075de]" : "text-black/50"}`}>월간</button><button onClick={() => setView("week")} className={`rounded-md px-3 py-1.5 text-sm ${view === "week" ? "bg-[#e6f3fe] text-[#0075de]" : "text-black/50"}`}>주간</button></div></PageTitle><Card className="overflow-hidden"><div className="flex items-center border-b border-black/[.08] px-5 py-4"><div className="flex items-center gap-3"><button type="button" onClick={() => onChangeMonth(-1)} className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04]" aria-label="이전 달"><ChevronLeft size={18}/></button><h2 className="font-semibold">{formatMonth(month)}</h2><button type="button" onClick={() => onChangeMonth(1)} className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04]" aria-label="다음 달"><ChevronRight size={18}/></button></div></div>{view === "month" ? <><div className="lg:hidden"><MobileMealList days={buildMonthDays(month).filter((cell) => cell.current)} meals={meals} onOpenDay={onOpenDay}/></div><div className="hidden lg:block"><MonthView month={month} meals={meals} onOpenDay={onOpenDay} onEditDay={onEditDay}/></div></> : <><div className="lg:hidden"><MobileMealList days={weekDays} meals={meals} onOpenDay={onOpenDay}/></div><div className="hidden lg:block"><WeekView month={month} meals={meals} onOpenDay={onOpenDay} onEditDay={onEditDay}/></div></>}</Card></>; }
-function MealCard({ meal, onEdit }: { meal: Meal; onEdit: () => void }) { return <div className={`group relative mt-2 rounded-md px-2 py-1.5 text-[11px] leading-tight break-keep ${meal.color}`}><button type="button" onClick={onEdit} className="absolute right-1 top-1 hidden h-8 w-8 place-items-center rounded text-black/35 hover:bg-white/70 hover:text-[#0075de] focus:grid lg:grid lg:opacity-0 lg:group-hover:opacity-100" aria-label={`${meal.day}일 식단 수정`}><Pencil size={12}/></button><span className="block pr-5 text-black/45">{meal.type}</span><b className="block font-medium">주찬 · {meal.main}</b>{meal.sides.map(side => <span key={side} className="mt-0.5 block text-black/60">부찬 · {side}</span>)}</div>; }
-function MonthView({ month, meals, onOpenDay, onEditDay }: { month: string; meals: Meal[]; onOpenDay: (date: string) => void; onEditDay: (date: string) => void }) { const lastTap = useRef({ date: "", at: 0 }); const onTouch = (date: string) => { const now = Date.now(); if (lastTap.current.date === date && now - lastTap.current.at < 350) onOpenDay(date); lastTap.current = { date, at: now }; }; return <div className="grid min-w-[728px] grid-cols-7">{["일","월","화","수","목","금","토"].map(x => <div className="border-b border-r border-black/[.08] px-3 py-2 text-xs font-medium text-black/40" key={x}>{x}</div>)}{buildMonthDays(month).map((cell, index) => { const meal = cell.current ? meals.find((item) => item.day === cell.day) : undefined; return <div onDoubleClick={() => cell.current && onOpenDay(cell.date)} onTouchEnd={() => cell.current && onTouch(cell.date)} className={`calendar-cell touch-manipulation ${cell.current ? "cursor-pointer" : "bg-black/[.015] text-black/30"}`} key={`${cell.date}-${index}`}><span className="grid h-6 w-6 place-items-center rounded-full text-xs">{cell.day}</span>{meal && <MealCard meal={meal} onEdit={() => onEditDay(cell.date)}/>}</div>})}</div>; }
-function MobileMealList({ days, meals, onOpenDay }: { days: ReturnType<typeof buildMonthDays>; meals: Meal[]; onOpenDay: (date: string) => void }) { return <div className="space-y-2 p-3">{days.map((cell) => { const meal = cell.current ? meals.find((item) => item.day === cell.day) : undefined; return <button type="button" key={cell.date} onClick={() => cell.current && onOpenDay(cell.date)} disabled={!cell.current} className={`flex w-full items-start gap-3 rounded-xl p-4 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${meal ? `${meal.color} hover:brightness-[.98]` : "bg-[#f6f5f4] text-black/35"}`} aria-label={cell.current ? `${cell.date} 식단 상세 보기` : `${cell.date} 이전 달 날짜`}><span className="min-w-10 pt-0.5 text-sm font-medium text-black/45">{weekdayFor(cell.date)}<br/>{cell.day}일</span>{meal ? <span className="min-w-0 flex-1"><b className="block break-keep text-[15px] leading-5">{meal.main}</b><span className="mt-1 block break-keep text-sm leading-5 text-black/60">{meal.sides.join(" · ")}</span></span> : <span className="pt-0.5 text-sm">{cell.current ? "식단 없음" : ""}</span>}</button>; })}</div>; }
-function WeekView({ month, meals, onOpenDay, onEditDay }: { month: string; meals: Meal[]; onOpenDay: (date: string) => void; onEditDay: (date: string) => void }) { const lastTap = useRef({ date: "", at: 0 }); const onTouch = (date: string) => { const now = Date.now(); if (lastTap.current.date === date && now - lastTap.current.at < 350) onOpenDay(date); lastTap.current = { date, at: now }; }; const week = buildMonthDays(month).slice(0, 7); return <div className="grid grid-cols-7">{["일","월","화","수","목","금","토"].map((label, index) => { const cell = week[index]; const meal = cell.current ? meals.find((item) => item.day === cell.day) : undefined; return <div onDoubleClick={() => cell.current && onOpenDay(cell.date)} onTouchEnd={() => cell.current && onTouch(cell.date)} key={label} className={`min-h-[420px] touch-manipulation border-r border-black/[.08] p-3 last:border-0 ${cell.current ? "cursor-pointer" : "bg-black/[.015] text-black/30"}`}><p className="text-center text-xs text-black/45">{label}</p><p className="mx-auto mt-2 grid h-7 w-7 place-items-center rounded-full text-sm">{cell.day}</p>{meal && <MealCard meal={meal} onEdit={() => onEditDay(cell.date)}/>}</div>})}</div>; }
-function Recipes({ recipes, setRecipes, weekStart, onRegenerate }: { recipes: Recipe[]; setRecipes: React.Dispatch<React.SetStateAction<Recipe[]>>; weekStart: string; onRegenerate: () => void }) {
+function PageTitle({
+  label,
+  title,
+  children,
+}: {
+  label: string;
+  title: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+      <div>
+        <p className="mb-1 text-sm text-black/60">{label}</p>
+        <h1 className="text-[28px] font-semibold tracking-[-.035em] md:text-[32px]">
+          {title}
+        </h1>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function WeekActions({
+  onChangeWeek,
+  onRegenerate,
+  regenerateLabel,
+}: {
+  onChangeWeek: (amount: number) => void;
+  onRegenerate: () => void;
+  regenerateLabel: string;
+}) {
+  const controlClass =
+    "grid h-11 w-11 place-items-center rounded-lg border border-black/[.08] bg-white text-black/60 transition-colors hover:bg-[#e6f3fe] hover:text-[#0075de] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40";
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        type="button"
+        onClick={() => onChangeWeek(-1)}
+        className={controlClass}
+        aria-label="이전 주"
+      >
+        <ChevronLeft size={17} />
+      </button>
+      <button
+        type="button"
+        onClick={() => onChangeWeek(1)}
+        className={controlClass}
+        aria-label="다음 주"
+      >
+        <ChevronRight size={17} />
+      </button>
+      <button
+        type="button"
+        onClick={onRegenerate}
+        className={`${controlClass} ml-1`}
+        title={regenerateLabel}
+        aria-label={regenerateLabel}
+      >
+        <RefreshCw size={17} />
+      </button>
+    </div>
+  );
+}
+function MealPlanner({
+  view,
+  setView,
+  month,
+  weekStart,
+  onChangeMonth,
+  onChangeWeek,
+  meals,
+  onOpenDay,
+  onEditDay,
+}: {
+  view: "month" | "week";
+  setView: (v: "month" | "week") => void;
+  month: string;
+  weekStart: string;
+  onChangeMonth: (amount: number) => void;
+  onChangeWeek: (amount: number) => void;
+  meals: Meal[];
+  onOpenDay: (date: string) => void;
+  onEditDay: (date: string) => void;
+}) {
+  const weekDays = buildWeekDays(weekStart);
+  const change = view === "month" ? onChangeMonth : onChangeWeek;
+  const periodLabel =
+    view === "month" ? formatMonth(month) : formatWeekRangeLong(weekStart);
+  return (
+    <>
+      <PageTitle
+        label="식단 플래너"
+        title={view === "month" ? `${month.slice(5)}월의 식단` : "이번 주 식단"}
+      >
+        <div
+          className="flex rounded-lg border border-black/[.08] bg-white p-1"
+          role="group"
+          aria-label="식단 보기 방식"
+        >
+          <button
+            type="button"
+            onClick={() => setView("month")}
+            aria-pressed={view === "month"}
+            className={`rounded-md px-3 py-1.5 text-sm ${view === "month" ? "bg-[#e6f3fe] text-[#0075de]" : "text-black/60"}`}
+          >
+            월간
+          </button>
+          <button
+            type="button"
+            onClick={() => setView("week")}
+            aria-pressed={view === "week"}
+            className={`rounded-md px-3 py-1.5 text-sm ${view === "week" ? "bg-[#e6f3fe] text-[#0075de]" : "text-black/60"}`}
+          >
+            주간
+          </button>
+        </div>
+      </PageTitle>
+      <Card className="overflow-hidden">
+        <div className="flex items-center border-b border-black/[.08] px-4 py-3 sm:px-5">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => change(-1)}
+              className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+              aria-label={view === "month" ? "이전 달" : "이전 주"}
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <h2 className="min-w-[126px] text-center font-semibold tabular-nums sm:min-w-[150px]">
+              {periodLabel}
+            </h2>
+            <button
+              type="button"
+              onClick={() => change(1)}
+              className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+              aria-label={view === "month" ? "다음 달" : "다음 주"}
+            >
+              <ChevronRight size={18} />
+            </button>
+          </div>
+        </div>
+        {view === "month" ? (
+          <>
+            <div className="lg:hidden">
+              <MobileMealList
+                days={buildMonthDays(month).filter((cell) => cell.current)}
+                meals={meals}
+                onOpenDay={onOpenDay}
+              />
+            </div>
+            <div className="hidden lg:block">
+              <MonthView
+                month={month}
+                meals={meals}
+                onOpenDay={onOpenDay}
+                onEditDay={onEditDay}
+              />
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="lg:hidden">
+              <MobileMealList
+                days={weekDays}
+                meals={meals}
+                onOpenDay={onOpenDay}
+              />
+            </div>
+            <div className="hidden lg:block">
+              <WeekView
+                days={weekDays}
+                meals={meals}
+                onOpenDay={onOpenDay}
+                onEditDay={onEditDay}
+              />
+            </div>
+          </>
+        )}
+      </Card>
+    </>
+  );
+}
+function MealCard({ meal, onEdit }: { meal: Meal; onEdit: () => void }) {
+  return (
+    <div
+      className={`group relative mt-2 rounded-md px-2 py-1.5 text-[11px] leading-tight break-keep ${meal.color}`}
+    >
+      <button
+        type="button"
+        onClick={onEdit}
+        className="absolute right-1 top-1 hidden h-8 w-8 place-items-center rounded text-black/35 hover:bg-white/70 hover:text-[#0075de] focus:grid lg:grid lg:opacity-0 lg:group-hover:opacity-100"
+        aria-label={`${meal.day}일 식단 수정`}
+      >
+        <Pencil size={12} />
+      </button>
+      <span className="block pr-5 text-black/45">{meal.type}</span>
+      <b className="block font-medium">주찬 · {meal.main}</b>
+      {meal.sides.map((side) => (
+        <span key={side} className="mt-0.5 block text-black/60">
+          부찬 · {side}
+        </span>
+      ))}
+    </div>
+  );
+}
+function MonthView({
+  month,
+  meals,
+  onOpenDay,
+  onEditDay,
+}: {
+  month: string;
+  meals: Meal[];
+  onOpenDay: (date: string) => void;
+  onEditDay: (date: string) => void;
+}) {
+  return (
+    <div className="grid min-w-[728px] grid-cols-7">
+      {["일", "월", "화", "수", "목", "금", "토"].map((x) => (
+        <div
+          className="border-b border-r border-black/[.08] px-3 py-2 text-xs font-medium text-black/55"
+          key={x}
+        >
+          {x}
+        </div>
+      ))}
+      {buildMonthDays(month).map((cell, index) => {
+        const meal = cell.current
+          ? meals.find((item) => item.date === cell.date)
+          : undefined;
+        return (
+          <div
+            className={`calendar-cell ${cell.current ? "" : "bg-black/[.015] text-black/30"}`}
+            key={`${cell.date}-${index}`}
+          >
+            <button
+              type="button"
+              onClick={() => cell.current && onOpenDay(cell.date)}
+              disabled={!cell.current}
+              className="grid h-7 w-7 place-items-center rounded-lg text-xs hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+              aria-label={`${cell.date} 식단 상세 보기`}
+            >
+              {cell.day}
+            </button>
+            {meal && (
+              <MealCard meal={meal} onEdit={() => onEditDay(cell.date)} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+function MobileMealList({
+  days,
+  meals,
+  onOpenDay,
+}: {
+  days: ReturnType<typeof buildMonthDays>;
+  meals: Meal[];
+  onOpenDay: (date: string) => void;
+}) {
+  return (
+    <div className="space-y-2 p-3">
+      {days.map((cell) => {
+        const meal = meals.find((item) => item.date === cell.date);
+        return (
+          <button
+            type="button"
+            key={cell.date}
+            onClick={() => onOpenDay(cell.date)}
+            className={`flex w-full items-start gap-3 rounded-xl p-4 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${meal ? `${meal.color} hover:brightness-[.98]` : "bg-[#f6f5f4] text-black/50"}`}
+            aria-label={`${cell.date} 식단 상세 보기`}
+          >
+            <span className="min-w-10 pt-0.5 text-sm font-medium text-black/60">
+              {weekdayFor(cell.date)}
+              <br />
+              {cell.day}일
+            </span>
+            {meal ? (
+              <span className="min-w-0 flex-1">
+                <b className="block break-keep text-[15px] leading-5">
+                  {meal.main}
+                </b>
+                <span className="mt-1 block break-keep text-sm leading-5 text-black/65">
+                  {meal.sides.join(" · ")}
+                </span>
+              </span>
+            ) : (
+              <span className="pt-0.5 text-sm">식단 없음</span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+function WeekView({
+  days,
+  meals,
+  onOpenDay,
+  onEditDay,
+}: {
+  days: ReturnType<typeof buildWeekDays>;
+  meals: Meal[];
+  onOpenDay: (date: string) => void;
+  onEditDay: (date: string) => void;
+}) {
+  return (
+    <div className="grid grid-cols-7">
+      {days.map((cell) => {
+        const meal = meals.find((item) => item.date === cell.date);
+        return (
+          <div
+            key={cell.date}
+            className="min-h-[420px] border-r border-black/[.08] p-3 last:border-0"
+          >
+            <button
+              type="button"
+              onClick={() => onOpenDay(cell.date)}
+              className="mx-auto block rounded-lg p-1 text-center focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+              aria-label={`${cell.date} 식단 상세 보기`}
+            >
+              <span className="block text-xs text-black/55">
+                {weekdayFor(cell.date)}
+              </span>
+              <span className="mt-1 grid h-7 w-7 place-items-center rounded-full text-sm">
+                {cell.day}
+              </span>
+            </button>
+            {meal && (
+              <MealCard meal={meal} onEdit={() => onEditDay(cell.date)} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+function Recipes({
+  recipes,
+  weekStart,
+  onChangeWeek,
+  onRegenerate,
+}: {
+  recipes: Recipe[];
+  weekStart: string;
+  onChangeWeek: (amount: number) => void;
+  onRegenerate: () => void;
+}) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<"전체" | "주찬" | "부찬">("전체");
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
-  const lastTap = useRef({ id: "", at: 0 });
-  const filtered = useMemo(() => recipes.filter((recipe) => (category === "전체" || recipe.category === category) && (recipe.title.includes(query) || recipe.tags.some((tag) => tag.includes(query)))), [category, query, recipes]);
-  const handleTouch = (recipe: Recipe) => { const now = Date.now(); if (lastTap.current.id === String(recipe.id) && now - lastTap.current.at < 350) setSelectedRecipe(recipe); lastTap.current = { id: String(recipe.id), at: now }; };
-  return <><PageTitle label={`${formatWeekRange(weekStart)} 레시피`} title="레시피"><button type="button" onClick={onRegenerate} className="grid h-10 w-10 place-items-center rounded-lg border border-black/[.08] bg-white text-black/55 transition-colors hover:bg-[#e6f3fe] hover:text-[#0075de] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40" title="이번 주 레시피 재생성" aria-label="이번 주 레시피 재생성"><RefreshCw size={17}/></button></PageTitle><div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="inline-flex w-fit rounded-lg border border-black/[.1] bg-white p-1" role="tablist" aria-label="레시피 종류">{(["전체", "주찬", "부찬"] as const).map((tab) => <button key={tab} type="button" role="tab" aria-selected={category === tab} onClick={() => setCategory(tab)} className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${category === tab ? "bg-[#e6f3fe] text-[#0075de]" : "text-black/50 hover:bg-[#f6f5f4] hover:text-black"}`}>{tab}</button>)}</div><div className="flex w-full max-w-md items-center gap-2 rounded-lg border border-black/[.1] bg-white px-3"><Search size={17} className="text-black/40"/><input value={query} onChange={e => setQuery(e.target.value)} className="h-10 w-full bg-transparent text-sm outline-none" placeholder="레시피 검색"/></div></div><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{filtered.map(recipe => <Card key={recipe.id} onDoubleClick={() => setSelectedRecipe(recipe)} onTouchEnd={(event) => { if (event.target instanceof Element && event.target.closest("a,button")) return; handleTouch(recipe); }} className="cursor-pointer overflow-hidden transition-shadow hover:shadow-md"><div className={`grid h-28 place-items-center text-5xl ${recipe.color}`}>{recipe.emoji}</div><CardContent className="p-4"><p className="text-xs font-medium text-[#0075de]">{formatRecipeDates(recipe.plannedDates)}</p><div className="mt-2 flex items-start justify-between gap-2"><div><p className="font-medium">{recipe.title}</p><p className="mt-1 text-sm text-black/45">{recipe.meta}</p></div><button onClick={(event) => { event.stopPropagation(); setRecipes(items => items.filter(r => r.id !== recipe.id)); }} className="p-1 text-black/35 hover:text-[#e32d14]" aria-label={`${recipe.title} 삭제`}><Trash2 size={16}/></button></div><div className="mt-3 flex flex-wrap gap-1">{recipe.tags.map(tag => <span key={tag} className="rounded-full bg-[#f6f5f4] px-2 py-1 text-[11px] text-black/55">{tag}</span>)}</div>{recipe.sourceUrl && <a onClick={(event) => event.stopPropagation()} href={recipe.sourceUrl} target="_blank" rel="noreferrer" className="mt-3 flex items-center gap-1 text-xs font-medium text-[#0075de] hover:underline" title={recipe.sourceTitle ?? undefined}><ExternalLink size={13}/>{recipe.sourceAuthor ? `${recipe.sourceAuthor} 블로그 원문` : "블로그 원문 보기"}</a>}</CardContent></Card>)}</div>{!filtered.length && <p className="rounded-xl border border-dashed border-black/[.12] p-8 text-center text-sm text-black/45">표시할 {category === "전체" ? "레시피" : category}이 없습니다.</p>}{selectedRecipe && <RecipeModal recipe={selectedRecipe} close={() => setSelectedRecipe(null)}/>}</>; }
-function RecipeModal({ recipe, close }: { recipe: Recipe; close: () => void }) { return <div onMouseDown={(event) => event.target === event.currentTarget && close()} className="fixed inset-0 z-50 grid overflow-y-auto bg-black/25 p-4 sm:place-items-center"><Card onMouseDown={(event) => event.stopPropagation()} className="my-auto w-full max-w-xl"><CardContent><div className="flex items-start justify-between gap-4"><div><p className="text-sm text-black/45">레시피</p><h2 className="mt-1 text-2xl font-semibold tracking-tight">{recipe.title}</h2><p className="mt-2 text-sm text-black/55">{recipe.meta} · 준비 {recipe.prepMinutes ?? 0}분 · 조리 {recipe.cookMinutes ?? 0}분</p></div><button onClick={close} className="grid h-10 w-10 place-items-center rounded-lg text-xl text-black/35 hover:bg-black/[.05]" aria-label="닫기">×</button></div>{recipe.description && <p className="mt-5 text-sm leading-6 text-black/65">{recipe.description}</p>}<section className="mt-6"><p className="text-xs font-semibold tracking-[.08em] text-black/40">재료</p>{recipe.ingredients?.length ? <div className="mt-3 grid gap-2 sm:grid-cols-2">{recipe.ingredients.map((ingredient) => <div key={`${ingredient.name}-${ingredient.amount}`} className="flex items-center justify-between rounded-lg bg-[#f6f5f4] px-3 py-2 text-sm"><span>{ingredient.name}</span><span className="text-black/50">{ingredient.amount}</span></div>)}</div> : <p className="mt-3 text-sm text-black/45">재료 정보가 아직 등록되지 않았습니다.</p>}</section><section className="mt-6"><p className="text-xs font-semibold tracking-[.08em] text-black/40">조리 방법</p>{recipe.instructions?.length ? <ol className="mt-3 space-y-3">{recipe.instructions.map((step, index) => <li key={`${index}-${step}`} className="flex gap-3 text-sm leading-6"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[#e6f3fe] text-xs font-semibold text-[#0075de]">{index + 1}</span><span>{step.replace(/^\d+[.)]\s*/, "")}</span></li>)}</ol> : <p className="mt-3 text-sm text-black/45">조리 순서가 아직 등록되지 않았습니다. 원문 레시피를 확인해 주세요.</p>}</section>{recipe.babySplitStep && <section className="mt-6 rounded-xl bg-[#fff0d4] p-4"><p className="text-xs font-semibold tracking-[.08em] text-[#9a6500]">아기 분리 조리</p><p className="mt-2 text-sm leading-6 text-black/70">{recipe.babySplitStep}</p></section>}{(recipe.storageMethod || recipe.consumeWithin) && <p className="mt-5 text-sm text-black/55">보관 · {recipe.storageMethod ?? "-"}{recipe.consumeWithin ? ` / ${recipe.consumeWithin} 내 섭취` : ""}</p>}{recipe.sourceUrl && <a href={recipe.sourceUrl} target="_blank" rel="noreferrer" className="mt-5 flex items-center gap-1 text-sm font-medium text-[#0075de] hover:underline"><ExternalLink size={15}/>{recipe.sourceAuthor ? `${recipe.sourceAuthor} 블로그 원문 보기` : "블로그 원문 보기"}</a>}</CardContent></Card></div>; }
-function GroceryList({ grocery, setGrocery, weekStart, onRegenerate }: { grocery: Grocery[]; setGrocery: React.Dispatch<React.SetStateAction<Grocery[]>>; weekStart: string; onRegenerate: () => void }) { const [name, setName] = useState(""); const [category, setCategory] = useState("기타"); const remaining = grocery.filter(i => !i.done).length; const add = () => { if (!name.trim()) return; setGrocery(items => [...items, { id: Date.now(), name, category, done: false }]); setName(""); }; const groups = grocery.reduce<Record<string, Grocery[]>>((acc, item) => ({ ...acc, [item.category]: [...(acc[item.category] ?? []), item] }), {}); return <><PageTitle label={`${formatWeekRange(weekStart)} 필요한 재료`} title="장보기"><div className="flex items-center gap-3"><span className="text-sm text-black/45">{remaining}개 남음</span><button type="button" onClick={onRegenerate} className="grid h-10 w-10 place-items-center rounded-lg border border-black/[.08] bg-white text-black/55 transition-colors hover:bg-[#e6f3fe] hover:text-[#0075de] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40" title="이번 주 준비된 레시피로 장보기 재계산" aria-label="이번 주 준비된 레시피로 장보기 재계산"><RefreshCw size={17}/></button></div></PageTitle><Card><CardContent><div className="mb-6 flex flex-wrap gap-2"><input value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === "Enter" && add()} className="h-9 min-w-[180px] flex-1 rounded-lg border border-black/10 px-3 text-sm outline-none focus:border-[#0075de]" placeholder="장보기 품목 입력"/><select value={category} onChange={e => setCategory(e.target.value)} className="h-9 rounded-lg border border-black/10 bg-white px-3 text-sm"><option>채소</option><option>정육</option><option>유제품</option><option>냉장</option><option>양념</option><option>기타</option></select><Button onClick={add}><Plus size={16}/>추가</Button></div>{Object.entries(groups).map(([group, items]) => <section key={group} className="mb-6 last:mb-0"><p className="mb-2 text-xs font-semibold tracking-[.08em] text-black/40">{group.toUpperCase()}</p>{items.map(item => <div className="flex items-center gap-3 border-t border-black/[.07] py-3" key={item.id}><button onClick={() => setGrocery(all => all.map(i => i.id === item.id ? { ...i, done: !i.done } : i))} className={`grid h-5 w-5 place-items-center rounded border ${item.done ? "border-[#0075de] bg-[#0075de] text-white" : "border-black/20"}`}>{item.done && <Check size={13}/>}</button><span className={`flex-1 text-sm ${item.done ? "text-black/35 line-through" : ""}`}>{item.name}</span><button onClick={() => setGrocery(all => all.filter(i => i.id !== item.id))} className="text-black/30 hover:text-[#e32d14]" aria-label={`${item.name} 삭제`}><Trash2 size={16}/></button></div>)}</section>)}</CardContent></Card></>; }
-function Family() { return <><PageTitle label="식단 기준을 함께 관리해요" title="우리 가족"/><Card><CardContent><p className="font-medium">가족 구성원 기능은 다음 단계로 준비 중이에요.</p><p className="mt-2 text-sm text-black/50">구성원의 알레르기, 선호 음식과 식사량을 등록하면 AI 식단 추천에 반영됩니다.</p></CardContent></Card></>; }
-function WeeklyReviewSettings({ onRequest }: { onRequest: (request: WeeklyReviewRequest) => void }) {
-  const [referenceDate, setReferenceDate] = useState(nextSunday()); const [wantedFoods, setWantedFoods] = useState(""); const [avoidFoods, setAvoidFoods] = useState(""); const [note, setNote] = useState(""); const [pantry, setPantry] = useState<{ name: string; quantity: string; unit: string; category: string; expiresAt: string }[]>([]); const [loading, setLoading] = useState(true); const [saving, setSaving] = useState(false); const [message, setMessage] = useState("");
-  useEffect(() => { const saved = window.localStorage.getItem("weekly-review-reference-date"); if (saved && /^\d{4}-\d{2}-\d{2}$/.test(saved)) setReferenceDate(saved); }, []);
-  useEffect(() => { window.localStorage.setItem("weekly-review-reference-date", referenceDate); setLoading(true); fetch(`/api/weekly-review?date=${referenceDate}`).then((response) => response.ok ? response.json() : Promise.reject()).then((data) => { const review = data.review; setWantedFoods(review?.wantedFoods ?? ""); setAvoidFoods(review?.avoidFoods ?? ""); setNote(review?.note ?? ""); setPantry((data.pantry ?? []).map((item: { name: string; quantity: number; unit: string; category: string; expiresAt?: string | null }) => ({ name: item.name, quantity: String(item.quantity), unit: item.unit, category: item.category, expiresAt: item.expiresAt ?? "" }))); }).catch(() => setMessage("점검 정보를 불러오지 못했습니다.")).finally(() => setLoading(false)); }, [referenceDate]);
-  const save = async (requestAgent: boolean) => { const weekStart = sundayFor(referenceDate); const endDate = addDaysLocal(weekStart, 6); setSaving(true); setMessage(""); try { const response = await fetch("/api/weekly-review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ referenceDate, wantedFoods, avoidFoods, note, pantry: pantry.filter((item) => item.name.trim()).map((item) => ({ ...item, quantity: Number(item.quantity) })) }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error ?? "저장하지 못했습니다."); if (requestAgent) onRequest({ weekStart, referenceDate, prompt: `주간 점검을 진행해줘. 판단 및 수정 범위는 ${referenceDate}부터 ${endDate}(토요일)까지다. weeklyReview와 pantry, 날짜 상세에 저장된 저녁 외식·가족별 점심/저녁 미식사 일정을 기준으로 유통기한 임박 재료와 식사 인원을 판단해. 기준 날짜 이전의 같은 주 식단은 변경하지 마. 특이사항이 없으면 현재 식단을 유지하고, 조정이 필요할 때만 해당 범위의 식단·레시피·장보기를 검증 후 게시해줘.` }); else setMessage("점검 정보가 저장됐어요."); } catch (error) { setMessage(error instanceof Error ? error.message : "저장하지 못했습니다."); } finally { setSaving(false); } };
-  const updatePantry = (index: number, field: "name" | "quantity" | "unit" | "category" | "expiresAt", value: string) => setPantry((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item));
-  return <><PageTitle label="매주 토요일 저녁 8시 점검" title="다음 주 식단 점검"/><Card><CardContent><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-medium">판단 시작 날짜</p><p className="mt-1 text-sm text-black/50">날짜를 바꾸면 그날부터 같은 주 토요일까지만 판단합니다. 외식과 식사 인원은 날짜 상세에서 체크해 주세요.</p></div><input type="date" value={referenceDate} onChange={(event) => setReferenceDate(event.target.value)} className="h-10 rounded-lg border border-black/[.12] bg-white px-3 text-sm outline-none focus:border-[#0075de]"/></div><div className="mt-6 grid gap-4 sm:grid-cols-2"><label className="text-sm font-medium">먹고 싶은 메뉴<textarea value={wantedFoods} onChange={(event) => setWantedFoods(event.target.value)} className="mt-2 h-20 w-full resize-none rounded-lg border border-black/[.12] p-3 font-normal outline-none focus:border-[#0075de]" placeholder="예: 카레, 생선구이"/></label><label className="text-sm font-medium">피하고 싶은 메뉴<textarea value={avoidFoods} onChange={(event) => setAvoidFoods(event.target.value)} className="mt-2 h-20 w-full resize-none rounded-lg border border-black/[.12] p-3 font-normal outline-none focus:border-[#0075de]" placeholder="예: 매운 음식, 면"/></label></div><label className="mt-4 block text-sm font-medium">추가 메모<textarea value={note} onChange={(event) => setNote(event.target.value)} className="mt-2 h-20 w-full resize-none rounded-lg border border-black/[.12] p-3 font-normal outline-none focus:border-[#0075de]" placeholder="컨디션, 냉장고 정리처럼 식단에 반영할 내용"/></label></CardContent></Card><Card className="mt-5"><CardContent><div className="flex items-center justify-between gap-3"><div><p className="font-medium">냉장고·팬트리 현황</p><p className="mt-1 text-sm text-black/50">유통기한을 넣으면 AI가 먼저 써야 할 재료를 더 정확히 판단합니다.</p></div><Button variant="outline" onClick={() => setPantry((items) => [...items, { name: "", quantity: "", unit: "g", category: "냉장", expiresAt: "" }])}><Plus size={16}/>재료 추가</Button></div><div className="mt-5 space-y-2">{loading ? <p className="py-5 text-sm text-black/45">불러오는 중...</p> : pantry.length ? pantry.map((item, index) => <div key={index} className="grid gap-2 rounded-xl bg-[#f6f5f4] p-3 sm:grid-cols-[1.5fr_.7fr_.7fr_1fr_1.2fr_auto]"><input value={item.name} onChange={(event) => updatePantry(index, "name", event.target.value)} className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm" placeholder="재료명"/><input value={item.quantity} onChange={(event) => updatePantry(index, "quantity", event.target.value)} className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm" type="number" min="0" placeholder="수량"/><input value={item.unit} onChange={(event) => updatePantry(index, "unit", event.target.value)} className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm" placeholder="단위"/><input value={item.category} onChange={(event) => updatePantry(index, "category", event.target.value)} className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm" placeholder="보관"/><input value={item.expiresAt} onChange={(event) => updatePantry(index, "expiresAt", event.target.value)} className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm" type="date"/><button type="button" onClick={() => setPantry((items) => items.filter((_, itemIndex) => itemIndex !== index))} className="grid h-9 w-9 place-items-center rounded-lg text-black/35 hover:bg-white hover:text-[#e32d14]" aria-label={`${item.name || "재료"} 삭제`}><Trash2 size={16}/></button></div>) : <p className="rounded-xl bg-[#f6f5f4] p-5 text-sm text-black/45">남은 재료를 추가해 주세요.</p>}</div><div className="mt-6 flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={saving} onClick={() => void save(false)}>정보 저장</Button><Button disabled={saving} onClick={() => void save(true)}><Sparkles size={16}/>{saving ? "저장 중..." : "저장하고 AI에게 판단 요청"}</Button></div>{message && <p className="mt-3 text-sm text-[#075f9f]">{message}</p>}</CardContent></Card></>;
+  const filtered = useMemo(
+    () =>
+      recipes.filter(
+        (recipe) =>
+          (category === "전체" || recipe.category === category) &&
+          (recipe.title.includes(query) ||
+            recipe.tags.some((tag) => tag.includes(query))),
+      ),
+    [category, query, recipes],
+  );
+  return (
+    <>
+      <PageTitle label={`${formatWeekRange(weekStart)} 레시피`} title="레시피">
+        <WeekActions
+          onChangeWeek={onChangeWeek}
+          onRegenerate={onRegenerate}
+          regenerateLabel="이번 주 레시피 재생성"
+        />
+      </PageTitle>
+      <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div
+          className="inline-flex w-fit rounded-lg border border-black/[.1] bg-white p-1"
+          role="tablist"
+          aria-label="레시피 종류"
+        >
+          {(["전체", "주찬", "부찬"] as const).map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              role="tab"
+              aria-selected={category === tab}
+              onClick={() => setCategory(tab)}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${category === tab ? "bg-[#e6f3fe] text-[#0075de]" : "text-black/60 hover:bg-[#f6f5f4] hover:text-black"}`}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+        <div className="flex w-full max-w-md items-center gap-2 rounded-lg border border-black/[.1] bg-white px-3">
+          <Search size={17} className="text-black/50" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="h-11 w-full bg-transparent text-base outline-none sm:text-sm"
+            placeholder="레시피 검색"
+            aria-label="레시피 검색"
+          />
+        </div>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {filtered.map((recipe) => (
+          <Card
+            key={recipe.id}
+            role="button"
+            tabIndex={0}
+            onClick={() => setSelectedRecipe(recipe)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                setSelectedRecipe(recipe);
+              }
+            }}
+            className="cursor-pointer overflow-hidden transition-colors hover:border-black/20 focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+          >
+            <div className={`grid h-24 place-items-center ${recipe.color}`}>
+              <span className="grid h-11 w-11 place-items-center rounded-full bg-white/70 text-black/65">
+                <ChefHat size={22} />
+              </span>
+            </div>
+            <CardContent className="p-4">
+              <p className="text-xs font-medium text-[#0075de]">
+                {formatRecipeDates(recipe.plannedDates)}
+              </p>
+              <div className="mt-2">
+                <p className="font-medium">{recipe.title}</p>
+                <p className="mt-1 text-sm text-black/55">{recipe.meta}</p>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1">
+                {recipe.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="rounded-full bg-[#f6f5f4] px-2 py-1 text-[11px] text-black/60"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+              {recipe.sourceUrl && (
+                <a
+                  onClick={(event) => event.stopPropagation()}
+                  href={recipe.sourceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-3 flex items-center gap-1 text-xs font-medium text-[#0075de] hover:underline"
+                  title={recipe.sourceTitle ?? undefined}
+                >
+                  <ExternalLink size={13} />
+                  {recipe.sourceAuthor
+                    ? `${recipe.sourceAuthor} 블로그 원문`
+                    : "블로그 원문 보기"}
+                </a>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      {!filtered.length && (
+        <p className="rounded-xl border border-dashed border-black/[.12] p-8 text-center text-sm text-black/55">
+          표시할 {category === "전체" ? "레시피" : category}이 없습니다.
+        </p>
+      )}
+      {selectedRecipe && (
+        <RecipeModal
+          recipe={selectedRecipe}
+          close={() => setSelectedRecipe(null)}
+        />
+      )}
+    </>
+  );
+}
+function RecipeModal({ recipe, close }: { recipe: Recipe; close: () => void }) {
+  return (
+    <Dialog
+      onClose={close}
+      labelledBy="recipe-dialog-title"
+      className="max-w-xl"
+    >
+      <CardContent>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm text-black/55">레시피</p>
+            <h2
+              id="recipe-dialog-title"
+              className="mt-1 text-2xl font-semibold tracking-tight"
+            >
+              {recipe.title}
+            </h2>
+            <p className="mt-2 text-sm text-black/60">
+              {recipe.meta} · 준비 {recipe.prepMinutes ?? 0}분 · 조리{" "}
+              {recipe.cookMinutes ?? 0}분
+            </p>
+          </div>
+          <button
+            data-autofocus
+            type="button"
+            onClick={close}
+            className="grid h-11 w-11 place-items-center rounded-lg text-xl text-black/50 hover:bg-black/[.05]"
+            aria-label="레시피 닫기"
+          >
+            ×
+          </button>
+        </div>
+        {recipe.description && (
+          <p className="mt-5 text-sm leading-6 text-black/70">
+            {recipe.description}
+          </p>
+        )}
+        <section className="mt-6">
+          <p className="text-xs font-semibold tracking-[.08em] text-black/55">
+            재료
+          </p>
+          {recipe.ingredients?.length ? (
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {recipe.ingredients.map((ingredient) => (
+                <div
+                  key={`${ingredient.name}-${ingredient.amount}`}
+                  className="flex items-center justify-between rounded-lg bg-[#f6f5f4] px-3 py-2 text-sm"
+                >
+                  <span>{ingredient.name}</span>
+                  <span className="text-black/60">{ingredient.amount}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-black/55">
+              재료 정보가 아직 등록되지 않았습니다.
+            </p>
+          )}
+        </section>
+        <section className="mt-6">
+          <p className="text-xs font-semibold tracking-[.08em] text-black/55">
+            조리 방법
+          </p>
+          {recipe.instructions?.length ? (
+            <ol className="mt-3 space-y-3">
+              {recipe.instructions.map((step, index) => (
+                <li
+                  key={`${index}-${step}`}
+                  className="flex gap-3 text-sm leading-6"
+                >
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[#e6f3fe] text-xs font-semibold text-[#0075de]">
+                    {index + 1}
+                  </span>
+                  <span>{step.replace(/^\d+[.)]\s*/, "")}</span>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="mt-3 text-sm text-black/55">
+              조리 순서가 아직 등록되지 않았습니다. 원문 레시피를 확인해 주세요.
+            </p>
+          )}
+        </section>
+        {recipe.babySplitStep && (
+          <section className="mt-6 rounded-xl bg-[#fff0d4] p-4">
+            <p className="text-xs font-semibold tracking-[.08em] text-[#765000]">
+              아기 분리 조리
+            </p>
+            <p className="mt-2 text-sm leading-6 text-black/70">
+              {recipe.babySplitStep}
+            </p>
+          </section>
+        )}
+        {(recipe.storageMethod || recipe.consumeWithin) && (
+          <p className="mt-5 text-sm text-black/60">
+            보관 · {recipe.storageMethod ?? "-"}
+            {recipe.consumeWithin ? ` / ${recipe.consumeWithin} 내 섭취` : ""}
+          </p>
+        )}
+        {recipe.sourceUrl && (
+          <a
+            href={recipe.sourceUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-5 flex items-center gap-1 text-sm font-medium text-[#0075de] hover:underline"
+          >
+            <ExternalLink size={15} />
+            {recipe.sourceAuthor
+              ? `${recipe.sourceAuthor} 블로그 원문 보기`
+              : "블로그 원문 보기"}
+          </a>
+        )}
+      </CardContent>
+    </Dialog>
+  );
+}
+function GroceryList({
+  grocery,
+  setGrocery,
+  weekStart,
+  onChangeWeek,
+  onChanged,
+  onRegenerate,
+}: {
+  grocery: Grocery[];
+  setGrocery: React.Dispatch<React.SetStateAction<Grocery[]>>;
+  weekStart: string;
+  onChangeWeek: (amount: number) => void;
+  onChanged: () => void;
+  onRegenerate: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [category, setCategory] = useState("기타");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const remaining = grocery.filter((i) => !i.done).length;
+  const request = async (url: string, init: RequestInit) => {
+    const response = await fetch(url, init);
+    const data = await response.json();
+    if (!response.ok)
+      throw new Error(data.error ?? "장보기 항목을 저장하지 못했습니다.");
+    return data;
+  };
+  const add = async () => {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await request("/api/grocery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ weekStart, name, category }),
+      });
+      setName("");
+      onChanged();
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "품목을 추가하지 못했습니다.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const toggle = async (item: Grocery) => {
+    const next = !item.done;
+    setGrocery((all) =>
+      all.map((value) =>
+        value.id === item.id ? { ...value, done: next } : value,
+      ),
+    );
+    try {
+      await request("/api/grocery", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: String(item.id), purchased: next }),
+      });
+    } catch (error) {
+      setGrocery((all) =>
+        all.map((value) =>
+          value.id === item.id ? { ...value, done: item.done } : value,
+        ),
+      );
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "완료 상태를 저장하지 못했습니다.",
+      );
+    }
+  };
+  const remove = async (item: Grocery) => {
+    const previous = grocery;
+    setGrocery((all) => all.filter((value) => value.id !== item.id));
+    try {
+      await request(`/api/grocery?id=${encodeURIComponent(String(item.id))}`, {
+        method: "DELETE",
+      });
+    } catch (error) {
+      setGrocery(previous);
+      setMessage(
+        error instanceof Error ? error.message : "품목을 삭제하지 못했습니다.",
+      );
+    }
+  };
+  const groups = grocery.reduce<Record<string, Grocery[]>>(
+    (acc, item) => ({
+      ...acc,
+      [item.category]: [...(acc[item.category] ?? []), item],
+    }),
+    {},
+  );
+  return (
+    <>
+      <PageTitle
+        label={`${formatWeekRange(weekStart)} 필요한 재료`}
+        title="장보기"
+      >
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span className="mr-1 text-sm text-black/55">{remaining}개 남음</span>
+          <WeekActions
+            onChangeWeek={onChangeWeek}
+            onRegenerate={onRegenerate}
+            regenerateLabel="이번 주 준비된 레시피로 장보기 재계산"
+          />
+        </div>
+      </PageTitle>
+      <Card>
+        <CardContent>
+          <div className="mb-6 flex flex-wrap gap-2">
+            <input
+              value={name}
+              maxLength={80}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void add();
+                }
+              }}
+              className="h-11 min-w-[180px] flex-1 rounded-lg border border-black/10 px-3 text-base outline-none focus:border-[#0075de] sm:text-sm"
+              placeholder="장보기 품목 입력"
+              aria-label="장보기 품목명"
+            />
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className="h-11 rounded-lg border border-black/10 bg-white px-3 text-base sm:text-sm"
+              aria-label="장보기 분류"
+            >
+              <option>채소</option>
+              <option>정육</option>
+              <option>유제품</option>
+              <option>냉장</option>
+              <option>양념</option>
+              <option>기타</option>
+            </select>
+            <Button
+              disabled={busy || !name.trim()}
+              onClick={() => void add()}
+              className="h-11"
+            >
+              <Plus size={16} />
+              {busy ? "저장 중" : "추가"}
+            </Button>
+          </div>
+          {message && (
+            <p
+              className="mb-4 rounded-lg bg-[#fff0d4] p-3 text-sm text-[#5f4300]"
+              role="status"
+            >
+              {message}
+            </p>
+          )}
+          {Object.entries(groups).map(([group, items]) => (
+            <section key={group} className="mb-6 last:mb-0">
+              <p className="mb-2 text-xs font-semibold tracking-[.08em] text-black/55">
+                {group}
+              </p>
+              {items.map((item) => (
+                <div
+                  className="flex items-center gap-2 border-t border-black/[.07] py-2"
+                  key={item.id}
+                >
+                  <button
+                    type="button"
+                    onClick={() => void toggle(item)}
+                    aria-pressed={item.done}
+                    aria-label={`${item.name} ${item.done ? "미구매로 변경" : "구매 완료"}`}
+                    className="grid h-11 w-11 shrink-0 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+                  >
+                    <span
+                      className={`grid h-5 w-5 place-items-center rounded border ${item.done ? "border-[#0075de] bg-[#0075de] text-white" : "border-black/30"}`}
+                    >
+                      {item.done && <Check size={13} />}
+                    </span>
+                  </button>
+                  <span
+                    className={`min-w-0 flex-1 text-sm ${item.done ? "text-black/50 line-through" : ""}`}
+                  >
+                    {item.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void remove(item)}
+                    className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-black/45 hover:bg-black/[.04] hover:text-[#e32d14] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+                    aria-label={`${item.name} 삭제`}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+            </section>
+          ))}
+          {!grocery.length && (
+            <p className="py-8 text-center text-sm text-black/55">
+              이 주차에 저장된 장보기 항목이 없습니다.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+function WeeklyReviewSettings({
+  onRequest,
+}: {
+  onRequest: (request: WeeklyReviewRequest) => void;
+}) {
+  const [referenceDate, setReferenceDate] = useState(nextSunday());
+  const [wantedFoods, setWantedFoods] = useState("");
+  const [avoidFoods, setAvoidFoods] = useState("");
+  const [note, setNote] = useState("");
+  const [pantry, setPantry] = useState<
+    {
+      name: string;
+      quantity: string;
+      unit: string;
+      category: string;
+      expiresAt: string;
+    }[]
+  >([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  useEffect(() => {
+    const saved = window.localStorage.getItem("weekly-review-reference-date");
+    if (saved && /^\d{4}-\d{2}-\d{2}$/.test(saved)) setReferenceDate(saved);
+  }, []);
+  useEffect(() => {
+    window.localStorage.setItem("weekly-review-reference-date", referenceDate);
+    setLoading(true);
+    fetch(`/api/weekly-review?date=${referenceDate}`)
+      .then((response) => (response.ok ? response.json() : Promise.reject()))
+      .then((data) => {
+        const review = data.review;
+        setWantedFoods(review?.wantedFoods ?? "");
+        setAvoidFoods(review?.avoidFoods ?? "");
+        setNote(review?.note ?? "");
+        setPantry(
+          (data.pantry ?? []).map(
+            (item: {
+              name: string;
+              quantity: number;
+              unit: string;
+              category: string;
+              expiresAt?: string | null;
+            }) => ({
+              name: item.name,
+              quantity: String(item.quantity),
+              unit: item.unit,
+              category: item.category,
+              expiresAt: item.expiresAt ?? "",
+            }),
+          ),
+        );
+      })
+      .catch(() => setMessage("점검 정보를 불러오지 못했습니다."))
+      .finally(() => setLoading(false));
+  }, [referenceDate]);
+  const save = async (requestAgent: boolean) => {
+    const weekStart = sundayFor(referenceDate);
+    const endDate = addDaysLocal(weekStart, 6);
+    setSaving(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/weekly-review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          referenceDate,
+          wantedFoods,
+          avoidFoods,
+          note,
+          pantry: pantry
+            .filter((item) => item.name.trim())
+            .map((item) => ({ ...item, quantity: Number(item.quantity) })),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "저장하지 못했습니다.");
+      if (requestAgent)
+        onRequest({
+          weekStart,
+          referenceDate,
+          prompt: `주간 점검을 진행해줘. 판단 및 수정 범위는 ${referenceDate}부터 ${endDate}(토요일)까지다. weeklyReview와 pantry, 날짜 상세에 저장된 저녁 외식·가족별 점심/저녁 미식사 일정을 기준으로 유통기한 임박 재료와 식사 인원을 판단해. 기준 날짜 이전의 같은 주 식단은 변경하지 마. 특이사항이 없으면 현재 식단을 유지하고, 조정이 필요할 때만 해당 범위의 식단·레시피·장보기를 검증 후 게시해줘.`,
+        });
+      else setMessage("점검 정보가 저장됐어요.");
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "저장하지 못했습니다.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+  const updatePantry = (
+    index: number,
+    field: "name" | "quantity" | "unit" | "category" | "expiresAt",
+    value: string,
+  ) =>
+    setPantry((items) =>
+      items.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, [field]: value } : item,
+      ),
+    );
+  return (
+    <>
+      <PageTitle label="매주 토요일 저녁 8시 점검" title="다음 주 식단 점검" />
+      <Card>
+        <CardContent>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="font-medium">판단 시작 날짜</p>
+              <p className="mt-1 text-sm text-black/50">
+                날짜를 바꾸면 그날부터 같은 주 토요일까지만 판단합니다. 외식과
+                식사 인원은 날짜 상세에서 체크해 주세요.
+              </p>
+            </div>
+            <input
+              type="date"
+              value={referenceDate}
+              onChange={(event) => setReferenceDate(event.target.value)}
+              className="h-10 rounded-lg border border-black/[.12] bg-white px-3 text-sm outline-none focus:border-[#0075de]"
+            />
+          </div>
+          <div className="mt-6 grid gap-4 sm:grid-cols-2">
+            <label className="text-sm font-medium">
+              먹고 싶은 메뉴
+              <textarea
+                value={wantedFoods}
+                onChange={(event) => setWantedFoods(event.target.value)}
+                className="mt-2 h-20 w-full resize-none rounded-lg border border-black/[.12] p-3 font-normal outline-none focus:border-[#0075de]"
+                placeholder="예: 카레, 생선구이"
+              />
+            </label>
+            <label className="text-sm font-medium">
+              피하고 싶은 메뉴
+              <textarea
+                value={avoidFoods}
+                onChange={(event) => setAvoidFoods(event.target.value)}
+                className="mt-2 h-20 w-full resize-none rounded-lg border border-black/[.12] p-3 font-normal outline-none focus:border-[#0075de]"
+                placeholder="예: 매운 음식, 면"
+              />
+            </label>
+          </div>
+          <label className="mt-4 block text-sm font-medium">
+            추가 메모
+            <textarea
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              className="mt-2 h-20 w-full resize-none rounded-lg border border-black/[.12] p-3 font-normal outline-none focus:border-[#0075de]"
+              placeholder="컨디션, 냉장고 정리처럼 식단에 반영할 내용"
+            />
+          </label>
+        </CardContent>
+      </Card>
+      <Card className="mt-5">
+        <CardContent>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="font-medium">냉장고·팬트리 현황</p>
+              <p className="mt-1 text-sm text-black/50">
+                유통기한을 넣으면 AI가 먼저 써야 할 재료를 더 정확히 판단합니다.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              onClick={() =>
+                setPantry((items) => [
+                  ...items,
+                  {
+                    name: "",
+                    quantity: "",
+                    unit: "g",
+                    category: "냉장",
+                    expiresAt: "",
+                  },
+                ])
+              }
+            >
+              <Plus size={16} />
+              재료 추가
+            </Button>
+          </div>
+          <div className="mt-5 space-y-2">
+            {loading ? (
+              <p className="py-5 text-sm text-black/45">불러오는 중...</p>
+            ) : pantry.length ? (
+              pantry.map((item, index) => (
+                <div
+                  key={index}
+                  className="grid gap-2 rounded-xl bg-[#f6f5f4] p-3 sm:grid-cols-[1.5fr_.7fr_.7fr_1fr_1.2fr_auto]"
+                >
+                  <input
+                    value={item.name}
+                    onChange={(event) =>
+                      updatePantry(index, "name", event.target.value)
+                    }
+                    className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm"
+                    placeholder="재료명"
+                  />
+                  <input
+                    value={item.quantity}
+                    onChange={(event) =>
+                      updatePantry(index, "quantity", event.target.value)
+                    }
+                    className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm"
+                    type="number"
+                    min="0"
+                    placeholder="수량"
+                  />
+                  <input
+                    value={item.unit}
+                    onChange={(event) =>
+                      updatePantry(index, "unit", event.target.value)
+                    }
+                    className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm"
+                    placeholder="단위"
+                  />
+                  <input
+                    value={item.category}
+                    onChange={(event) =>
+                      updatePantry(index, "category", event.target.value)
+                    }
+                    className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm"
+                    placeholder="보관"
+                  />
+                  <input
+                    value={item.expiresAt}
+                    onChange={(event) =>
+                      updatePantry(index, "expiresAt", event.target.value)
+                    }
+                    className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm"
+                    type="date"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPantry((items) =>
+                        items.filter((_, itemIndex) => itemIndex !== index),
+                      )
+                    }
+                    className="grid h-9 w-9 place-items-center rounded-lg text-black/35 hover:bg-white hover:text-[#e32d14]"
+                    aria-label={`${item.name || "재료"} 삭제`}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))
+            ) : (
+              <p className="rounded-xl bg-[#f6f5f4] p-5 text-sm text-black/45">
+                남은 재료를 추가해 주세요.
+              </p>
+            )}
+          </div>
+          <div className="mt-6 flex flex-wrap justify-end gap-2">
+            <Button
+              variant="outline"
+              disabled={saving}
+              onClick={() => void save(false)}
+            >
+              정보 저장
+            </Button>
+            <Button disabled={saving} onClick={() => void save(true)}>
+              <Sparkles size={16} />
+              {saving ? "저장 중..." : "저장하고 AI에게 판단 요청"}
+            </Button>
+          </div>
+          {message && <p className="mt-3 text-sm text-[#075f9f]">{message}</p>}
+        </CardContent>
+      </Card>
+    </>
+  );
 }
 function DayDetailModal({ date, close }: { date: string; close: () => void }) {
   const [detail, setDetail] = useState<DayDetail | null>(null);
   const [saving, setSaving] = useState(false);
-  const load = () => fetch(`/api/day-details?date=${date}`).then((response) => response.ok ? response.json() : Promise.reject()).then(setDetail);
-  useEffect(() => { load().catch(() => setDetail(null)); }, [date]);
-  const updateAttendance = (person: keyof DayDetail["attendance"], field: keyof Attendance, value: boolean) => setDetail((current) => current ? { ...current, attendance: { ...current.attendance, [person]: { ...current.attendance[person], [field]: value } } } : current);
-  const updateDinnerDiningOut = (value: boolean) => setDetail((current) => current?.meal ? { ...current, meal: { ...current.meal, dinnerDiningOut: value } } : current);
+  const [error, setError] = useState("");
+  const load = useCallback(() => {
+    setError("");
+    setDetail(null);
+    return fetch(`/api/day-details?date=${date}`)
+      .then((response) => (response.ok ? response.json() : Promise.reject()))
+      .then(setDetail)
+      .catch(() => setError("날짜 정보를 불러오지 못했습니다."));
+  }, [date]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const updateAttendance = (
+    person: keyof DayDetail["attendance"],
+    field: keyof Attendance,
+    value: boolean,
+  ) =>
+    setDetail((current) =>
+      current
+        ? {
+            ...current,
+            attendance: {
+              ...current.attendance,
+              [person]: { ...current.attendance[person], [field]: value },
+            },
+          }
+        : current,
+    );
+  const updateDinnerDiningOut = (value: boolean) =>
+    setDetail((current) =>
+      current?.meal
+        ? { ...current, meal: { ...current.meal, dinnerDiningOut: value } }
+        : current,
+    );
   const save = async () => {
     if (!detail) return;
     setSaving(true);
     try {
-      const response = await fetch("/api/day-details", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, dinnerDiningOut: detail.meal?.dinnerDiningOut ?? false, attendance: detail.attendance, father: detail.attendance.father, mother: detail.attendance.mother }) });
-      if (!response.ok) throw new Error();
+      const response = await fetch("/api/day-details", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date,
+          dinnerDiningOut: detail.meal?.dinnerDiningOut ?? false,
+          attendance: detail.attendance,
+          father: detail.attendance.father,
+          mother: detail.attendance.mother,
+        }),
+      });
+      if (!response.ok) throw new Error("식사 일정을 저장하지 못했습니다.");
       setDetail(await response.json());
-    } finally { setSaving(false); }
+      setError("저장했습니다.");
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "식사 일정을 저장하지 못했습니다.",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
-  return <div onMouseDown={(event) => event.target === event.currentTarget && close()} className="fixed inset-0 z-50 grid overflow-y-auto bg-black/25 p-4 sm:place-items-center"><Card onMouseDown={(event) => event.stopPropagation()} className="my-auto w-full max-w-lg"><CardContent><div className="flex items-start justify-between"><div><p className="text-sm text-black/45">날짜 상세</p><h2 className="mt-1 text-2xl font-semibold tracking-tight">{date.replaceAll("-", ".")} 식단</h2></div><button onClick={close} className="text-xl text-black/35" aria-label="닫기">×</button></div>{!detail ? <p className="py-12 text-center text-sm text-black/45">불러오는 중...</p> : <><section className="mt-6 rounded-xl bg-[#f6f5f4] p-4"><p className="text-xs font-semibold tracking-[.08em] text-black/40">식단</p>{detail.meal ? <div className="mt-3 space-y-2 text-sm"><p><span className="text-black/45">점심</span> · {detail.meal.lunch ?? "계획 없음"}</p><p className="font-medium">주찬 · {detail.meal.main ?? "계획 없음"}</p>{detail.meal.sides.map((side) => <p key={side} className="text-black/65">부찬 · {side}</p>)}{detail.meal.baby && <p className="text-black/65">아기 · {detail.meal.baby}</p>}{detail.meal.note && <p className="pt-1 text-xs text-black/45">메모 · {detail.meal.note}</p>}</div> : <p className="mt-3 text-sm text-black/45">등록된 식단이 없습니다.</p>}</section><section className="mt-4 rounded-xl border border-black/[.08] p-4"><div><p className="text-xs font-semibold tracking-[.08em] text-black/40">식사 인원과 외식</p><p className="mt-1 text-sm text-black/55">체크하면 해당 끼니를 집에서 먹지 않는 것으로 저장됩니다.</p></div><div className="mt-4 space-y-3 text-sm"><label className="flex items-center justify-between rounded-lg bg-[#fff0d4] px-3 py-2.5"><span className="font-medium">저녁 외식</span><input type="checkbox" checked={detail.meal?.dinnerDiningOut ?? false} onChange={(event) => updateDinnerDiningOut(event.target.checked)} className="h-4 w-4 accent-[#0075de]"/></label>{([['father', '아빠'], ['mother', '엄마']] as const).map(([person, label]) => <div key={person} className="rounded-lg bg-[#f6f5f4] p-3"><p className="font-medium">{label}</p><div className="mt-2 grid grid-cols-2 gap-2"><label className="flex items-center justify-between gap-2 text-black/65"><span>점심 미식사</span><input type="checkbox" checked={detail.attendance[person].lunchNotAtHome} onChange={(event) => updateAttendance(person, "lunchNotAtHome", event.target.checked)} className="h-4 w-4 accent-[#0075de]"/></label><label className="flex items-center justify-between gap-2 text-black/65"><span>저녁 미식사</span><input type="checkbox" checked={detail.attendance[person].dinnerNotAtHome} onChange={(event) => updateAttendance(person, "dinnerNotAtHome", event.target.checked)} className="h-4 w-4 accent-[#0075de]"/></label></div></div>)}</div><Button disabled={saving} onClick={save} className="mt-4 w-full">{saving ? "저장 중..." : "식사 일정 저장"}</Button></section></>}</CardContent></Card></div>;
+  return (
+    <Dialog onClose={close} labelledBy="day-detail-title" className="max-w-lg">
+      <CardContent>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm text-black/55">{weekdayFor(date)}요일</p>
+            <h2
+              id="day-detail-title"
+              className="mt-1 text-2xl font-semibold tracking-tight"
+            >
+              {date.replaceAll("-", ".")} 식단
+            </h2>
+          </div>
+          <button
+            data-autofocus
+            type="button"
+            onClick={close}
+            className="grid h-11 w-11 place-items-center rounded-lg text-xl text-black/50 hover:bg-black/[.05]"
+            aria-label="날짜 상세 닫기"
+          >
+            ×
+          </button>
+        </div>
+        {!detail ? (
+          <div className="py-12 text-center">
+            {error ? (
+              <>
+                <p className="text-sm text-black/60">{error}</p>
+                <Button
+                  variant="outline"
+                  onClick={() => void load()}
+                  className="mt-4"
+                >
+                  다시 불러오기
+                </Button>
+              </>
+            ) : (
+              <p className="text-sm text-black/55">식단을 불러오는 중입니다.</p>
+            )}
+          </div>
+        ) : (
+          <>
+            <section className="mt-6 rounded-xl bg-[#f6f5f4] p-4">
+              <p className="text-xs font-semibold tracking-[.08em] text-black/55">
+                오늘의 식단
+              </p>
+              {detail.meal ? (
+                <div className="mt-3 space-y-2 text-sm">
+                  <p>
+                    <span className="text-black/55">점심</span> ·{" "}
+                    {detail.meal.lunch ?? "계획 없음"}
+                  </p>
+                  <p className="font-medium">
+                    주찬 · {detail.meal.main ?? "계획 없음"}
+                  </p>
+                  {detail.meal.sides.map((side) => (
+                    <p key={side} className="text-black/70">
+                      부찬 · {side}
+                    </p>
+                  ))}
+                  {detail.meal.baby && (
+                    <p className="text-black/70">아기 · {detail.meal.baby}</p>
+                  )}
+                  {detail.meal.note && (
+                    <p className="pt-1 text-xs text-black/55">
+                      메모 · {detail.meal.note}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-black/55">
+                  등록된 식단이 없습니다.
+                </p>
+              )}
+            </section>
+            <section className="mt-4 rounded-xl border border-black/[.08]">
+              <div className="border-b border-black/[.08] p-4">
+                <h3 className="font-semibold">집에서 먹지 않는 끼니</h3>
+                <p className="mt-1 text-sm leading-5 text-black/60">
+                  체크한 일정은 다음 식단 검토 때 인원과 장보기에 반영됩니다.
+                </p>
+              </div>
+              <div className="divide-y divide-black/[.07]">
+                <div className="flex items-center justify-between gap-4 px-4 py-3">
+                  <div>
+                    <p className="text-sm font-medium">가족 저녁</p>
+                    <p className="text-xs text-black/55">
+                      가족 모두 외식하는 날
+                    </p>
+                  </div>
+                  <ScheduleCheck
+                    label="저녁 외식"
+                    checked={detail.meal?.dinnerDiningOut ?? false}
+                    onChange={updateDinnerDiningOut}
+                  />
+                </div>
+                {(
+                  [
+                    ["father", "아빠"],
+                    ["mother", "엄마"],
+                  ] as const
+                ).map(([person, label]) => (
+                  <div
+                    key={person}
+                    className="grid gap-3 px-4 py-3 sm:grid-cols-[1fr_auto]"
+                  >
+                    <p className="text-sm font-medium">{label}</p>
+                    <div className="flex flex-wrap gap-x-5 gap-y-2">
+                      <ScheduleCheck
+                        label="점심 미식사"
+                        checked={detail.attendance[person].lunchNotAtHome}
+                        onChange={(value) =>
+                          updateAttendance(person, "lunchNotAtHome", value)
+                        }
+                      />
+                      <ScheduleCheck
+                        label="저녁 미식사"
+                        checked={detail.attendance[person].dinnerNotAtHome}
+                        onChange={(value) =>
+                          updateAttendance(person, "dinnerNotAtHome", value)
+                        }
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+            <Button
+              disabled={saving}
+              onClick={() => void save()}
+              className="mt-4 h-11 w-full"
+            >
+              {saving ? "저장 중..." : "식사 일정 저장"}
+            </Button>
+            {error && (
+              <p
+                className="mt-3 text-center text-sm text-black/60"
+                role="status"
+              >
+                {error}
+              </p>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Dialog>
+  );
+}
+
+function ScheduleCheck({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <label className="flex min-h-11 cursor-pointer items-center gap-2 rounded-lg px-1 text-sm text-black/70">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="peer sr-only"
+      />
+      <span
+        aria-hidden="true"
+        className={`grid h-5 w-5 shrink-0 place-items-center rounded border transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-[#0075de]/40 peer-focus-visible:ring-offset-2 ${checked ? "border-[#0075de] bg-[#0075de] text-white" : "border-black/30 bg-white"}`}
+      >
+        {checked && <Check size={13} />}
+      </span>
+      <span>{label}</span>
+    </label>
+  );
 }
 function ChatModal({ close }: { close: () => void }) {
-  const [messages, setMessages] = useState<ChatMessage[]>([{ role: "assistant", content: "오늘 식단, 레시피, 장보기처럼 우리집 식탁에 관한 것을 물어보세요. 필요하면 웹에서 확인한 정보도 함께 알려드릴게요." }]);
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      role: "assistant",
+      content:
+        "오늘 식단, 레시피, 장보기처럼 우리집 식탁에 관한 것을 물어보세요. 필요하면 웹에서 확인한 정보도 함께 알려드릴게요.",
+    },
+  ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const messageArea = useRef<HTMLDivElement>(null);
-  useEffect(() => { messageArea.current?.scrollTo({ top: messageArea.current.scrollHeight, behavior: "smooth" }); }, [messages, loading]);
+  useEffect(() => {
+    messageArea.current?.scrollTo({
+      top: messageArea.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [messages, loading]);
   const send = async () => {
     const content = input.trim();
     if (!content || loading) return;
     const nextMessages = [...messages, { role: "user" as const, content }];
-    setMessages(nextMessages); setInput(""); setLoading(true);
+    setMessages(nextMessages);
+    setInput("");
+    setLoading(true);
     try {
-      const response = await fetch("/api/agent/meal-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, conversation: messages.slice(-8) }) });
+      const response = await fetch("/api/agent/meal-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: content,
+          conversation: messages.slice(-8),
+        }),
+      });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.message ?? data.error ?? "AI가 답변을 처리하지 못했습니다.");
+      if (!response.ok)
+        throw new Error(
+          data.message ?? data.error ?? "AI가 답변을 처리하지 못했습니다.",
+        );
       const deadline = Date.now() + 95_000;
-      let result: { status?: string; answer?: string; sources?: ChatMessage["sources"]; error?: string } | null = null;
+      let result: {
+        status?: string;
+        answer?: string;
+        sources?: ChatMessage["sources"];
+        error?: string;
+      } | null = null;
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 1_500));
-        const statusResponse = await fetch(`/api/agent/meal-chat?id=${encodeURIComponent(data.id)}`);
+        const statusResponse = await fetch(
+          `/api/agent/meal-chat?id=${encodeURIComponent(data.id)}`,
+        );
         if (!statusResponse.ok) continue;
-        const nextResult = await statusResponse.json() as { status?: string; answer?: string; sources?: ChatMessage["sources"]; error?: string };
+        const nextResult = (await statusResponse.json()) as {
+          status?: string;
+          answer?: string;
+          sources?: ChatMessage["sources"];
+          error?: string;
+        };
         result = nextResult;
-        if (nextResult.status === "COMPLETED" || nextResult.status === "FAILED") break;
+        if (nextResult.status === "COMPLETED" || nextResult.status === "FAILED")
+          break;
       }
-      if (result?.status === "COMPLETED") setMessages((current) => [...current, { role: "assistant", content: result.answer ?? "AI가 빈 답변을 남겼습니다.", sources: result.sources }]);
-      else setMessages((current) => [...current, { role: "assistant", content: result?.error ?? "AI가 아직 답변을 마치지 못했습니다. 잠시 후 다시 질문해 주세요." }]);
-    } catch (error) { setMessages((current) => [...current, { role: "assistant", content: error instanceof Error ? error.message : "AI에 연결할 수 없습니다." }]); }
-    finally { setLoading(false); }
+      if (result?.status === "COMPLETED")
+        setMessages((current) => [
+          ...current,
+          {
+            role: "assistant",
+            content: result.answer ?? "AI가 빈 답변을 남겼습니다.",
+            sources: result.sources,
+          },
+        ]);
+      else
+        setMessages((current) => [
+          ...current,
+          {
+            role: "assistant",
+            content:
+              result?.error ??
+              "AI가 아직 답변을 마치지 못했습니다. 잠시 후 다시 질문해 주세요.",
+          },
+        ]);
+    } catch (error) {
+      setMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content:
+            error instanceof Error ? error.message : "AI에 연결할 수 없습니다.",
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
   };
-  return <div onMouseDown={(event) => event.target === event.currentTarget && close()} className="fixed inset-0 z-50 grid overflow-y-auto bg-black/30 p-4 sm:place-items-center"><Card onMouseDown={(event) => event.stopPropagation()} className="my-auto flex h-[min(680px,calc(100dvh-2rem))] w-full max-w-2xl flex-col overflow-hidden"><div className="flex items-start justify-between border-b border-black/[.08] px-5 py-4"><div><div className="flex items-center gap-2 text-sm text-[#0075de]"><MessageCircle size={16}/><span className="font-medium">AI 채팅</span></div><h2 className="mt-1 text-xl font-semibold tracking-tight">우리집 식탁에게 물어보기</h2></div><button onClick={close} className="grid h-10 w-10 place-items-center rounded-lg text-xl text-black/35 hover:bg-black/[.05]" aria-label="닫기">×</button></div><div ref={messageArea} className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-[#fcfbfa] p-5">{messages.map((message, index) => <div key={`${message.role}-${index}`} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}><div className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-6 ${message.role === "user" ? "rounded-br-md bg-[#0d1247] text-white" : "rounded-bl-md bg-white text-black/75 shadow-sm ring-1 ring-black/[.06]"}`}><p className="whitespace-pre-wrap">{message.content}</p>{message.sources?.length ? <div className="mt-3 border-t border-black/[.08] pt-2">{message.sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs font-medium text-[#0075de] hover:underline"><ExternalLink size={12}/>{source.title ?? "참고 자료"}</a>)}</div> : null}</div></div>)}{loading && <div className="flex justify-start"><div className="flex items-center gap-2 rounded-2xl rounded-bl-md bg-white px-4 py-3 text-sm text-black/50 shadow-sm ring-1 ring-black/[.06]"><LoaderCircle className="animate-spin" size={15}/>AI가 확인 중이에요</div></div>}</div><form onSubmit={(event) => { event.preventDefault(); void send(); }} className="border-t border-black/[.08] bg-white p-3"><div className="flex items-end gap-2 rounded-xl border border-black/[.12] bg-[#fcfbfa] p-2 focus-within:border-[#0075de]"><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} disabled={loading} className="max-h-28 min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none placeholder:text-black/35" placeholder="예: 오늘 저녁 칼로리는 몇이야?" aria-label="AI에게 질문하기"/><button type="submit" disabled={!input.trim() || loading} className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#0d1247] text-white transition-colors hover:bg-[#171e62] disabled:cursor-not-allowed disabled:bg-black/15" aria-label="보내기"><Send size={16}/></button></div><p className="px-1 pt-2 text-[11px] text-black/40">채팅은 읽기 전용입니다. 식단 변경은 날짜 상세의 AI 요청을 이용해 주세요.</p></form></Card></div>;
+  return (
+    <Dialog
+      onClose={close}
+      labelledBy="chat-dialog-title"
+      className="flex h-[min(680px,calc(100dvh-2rem))] max-w-2xl flex-col overflow-hidden"
+    >
+      <div className="flex items-start justify-between border-b border-black/[.08] px-5 py-4">
+        <div>
+          <div className="flex items-center gap-2 text-sm text-[#0075de]">
+            <MessageCircle size={16} />
+            <span className="font-medium">AI 채팅</span>
+          </div>
+          <h2
+            id="chat-dialog-title"
+            className="mt-1 text-xl font-semibold tracking-tight"
+          >
+            우리집 식탁에게 물어보기
+          </h2>
+        </div>
+        <button
+          data-autofocus
+          type="button"
+          onClick={close}
+          className="grid h-11 w-11 place-items-center rounded-lg text-xl text-black/50 hover:bg-black/[.05]"
+          aria-label="AI 채팅 닫기"
+        >
+          ×
+        </button>
+      </div>
+      <div
+        ref={messageArea}
+        className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-[#fcfbfa] p-5"
+        aria-live="polite"
+      >
+        {messages.map((message, index) => (
+          <div
+            key={`${message.role}-${index}`}
+            className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+          >
+            <div
+              className={`max-w-[88%] rounded-xl px-4 py-3 text-sm leading-6 ${message.role === "user" ? "bg-[#0d1247] text-white" : "bg-white text-black/75 ring-1 ring-black/[.06]"}`}
+            >
+              <p className="whitespace-pre-wrap">{message.content}</p>
+              {message.sources?.length ? (
+                <div className="mt-3 border-t border-black/[.08] pt-2">
+                  {message.sources.map((source) => (
+                    <a
+                      key={source.url}
+                      href={source.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex items-center gap-1 text-xs font-medium text-[#0075de] hover:underline"
+                    >
+                      <ExternalLink size={12} />
+                      {source.title ?? "참고 자료"}
+                    </a>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div className="flex justify-start">
+            <div className="flex items-center gap-2 rounded-xl bg-white px-4 py-3 text-sm text-black/60 ring-1 ring-black/[.06]">
+              <LoaderCircle className="animate-spin" size={15} />
+              AI가 확인 중이에요
+            </div>
+          </div>
+        )}
+      </div>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void send();
+        }}
+        className="border-t border-black/[.08] bg-white p-3"
+      >
+        <div className="flex items-end gap-2 rounded-xl border border-black/[.12] bg-[#fcfbfa] p-2 focus-within:border-[#0075de]">
+          <textarea
+            value={input}
+            maxLength={2000}
+            onChange={(event) => setInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void send();
+              }
+            }}
+            disabled={loading}
+            className="max-h-28 min-h-11 flex-1 resize-none bg-transparent px-2 py-2 text-base outline-none placeholder:text-black/45 sm:text-sm"
+            placeholder="예: 오늘 저녁 칼로리는 몇이야?"
+            aria-label="AI에게 질문하기"
+          />
+          <button
+            type="submit"
+            disabled={!input.trim() || loading}
+            className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-[#0d1247] text-white transition-colors hover:bg-[#171e62] disabled:cursor-not-allowed disabled:bg-black/15"
+            aria-label="보내기"
+          >
+            <Send size={16} />
+          </button>
+        </div>
+        <p className="px-1 pt-2 text-[11px] text-black/55">
+          채팅은 읽기 전용입니다. 식단 변경은 날짜별 수정 기능을 이용해 주세요.
+        </p>
+      </form>
+    </Dialog>
+  );
 }
-function AgentModal({ request, close, onPublished }: { request: AgentRequest; close: () => void; onPublished: () => void }) {
+function AgentModal({
+  request,
+  close,
+  onPublished,
+}: {
+  request: AgentRequest;
+  close: () => void;
+  onPublished: () => void;
+}) {
   const [prompt, setPrompt] = useState(request.prompt);
   const [message, setMessage] = useState("");
   const [result, setResult] = useState<DayUpdateResult | null>(null);
   const [loading, setLoading] = useState(false);
-  const description = request.action === "UPDATE_DAY" ? `${request.date} 식단과 그 날짜의 레시피·장보기만 수정합니다.`
-    : request.action === "REGENERATE_RECIPES" ? "선택한 주차의 메뉴는 유지하고 레시피만 새로 만듭니다."
-    : request.action === "REGENERATE_GROCERY" ? "준비된 주간 레시피를 합산해 장보기만 다시 계산합니다."
-    : "이번 주 식단과 검증된 블로그 레시피·장보기를 준비합니다.";
+  const [requestId, setRequestId] = useState<string | null>(null);
+  const [beforeSnapshot, setBeforeSnapshot] = useState<MealSnapshot | null>(
+    null,
+  );
+  const description =
+    request.action === "UPDATE_DAY"
+      ? `${request.date} 식단과 그 날짜의 레시피·장보기만 수정합니다.`
+      : request.action === "REGENERATE_RECIPES"
+        ? "선택한 주차의 메뉴는 유지하고 레시피만 새로 만듭니다."
+        : request.action === "REGENERATE_GROCERY"
+          ? "준비된 주간 레시피를 합산해 장보기만 다시 계산합니다."
+          : "이번 주 식단과 검증된 블로그 레시피·장보기를 준비합니다.";
   const createPlan = async () => {
     if (!prompt.trim()) return;
-    setLoading(true); setMessage(""); setResult(null);
+    setLoading(true);
+    setMessage("");
+    setResult(null);
     try {
-      const response = await fetch("/api/agent/meal-plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, action: request.action, date: request.date, weekStart: request.weekStart ?? sundayFor(request.date), days: request.action === "UPDATE_DAY" ? 1 : 7 }) });
+      const response = await fetch("/api/agent/meal-plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          action: request.action,
+          date: request.date,
+          weekStart: request.weekStart ?? sundayFor(request.date),
+          days: request.action === "UPDATE_DAY" ? 1 : 7,
+        }),
+      });
       const data = await response.json();
-      setMessage(response.ok ? data.message : data.message ?? data.error ?? "AI 요청에 실패했습니다.");
-      if (response.ok && data.result) setResult(data.result);
-      if (response.ok && request.action !== "UPDATE_DAY" && !data.pending) onPublished();
-    } catch { setMessage("AI에 연결할 수 없습니다."); }
-    finally { setLoading(false); }
+      setMessage(
+        response.ok
+          ? data.message
+          : (data.message ?? data.error ?? "AI 요청에 실패했습니다."),
+      );
+      if (response.ok && data.requestId) {
+        setBeforeSnapshot(data.before ?? null);
+        setRequestId(data.requestId);
+      }
+    } catch {
+      setMessage("AI에 연결할 수 없습니다.");
+    } finally {
+      setLoading(false);
+    }
   };
-  return <div onMouseDown={(event) => event.target === event.currentTarget && close()} className="fixed inset-0 z-50 grid overflow-y-auto bg-black/25 p-4 sm:place-items-center"><Card onMouseDown={(event) => event.stopPropagation()} className="my-auto w-full max-w-xl"><CardContent><div className="flex items-start justify-between"><div className="grid h-10 w-10 place-items-center rounded-xl bg-[#fff0d4]"><Sparkles className="text-[#e89d01]" size={20}/></div><button onClick={close} className="text-xl text-black/35">×</button></div><h2 className="mt-5 text-2xl font-semibold tracking-tight">AI에게 식단을 부탁해 보세요</h2><p className="mt-2 text-sm leading-5 text-black/55">{description}</p><textarea value={prompt} onChange={e => setPrompt(e.target.value)} className="mt-5 h-28 w-full resize-none rounded-lg border border-black/[.12] p-3 text-sm outline-none focus:border-[#0075de]"/><Button disabled={!prompt.trim() || loading} onClick={createPlan} className="mt-3 w-full"><Sparkles size={16}/>{loading ? "AI가 확인하고 있어요..." : "AI에게 요청하기"}</Button>{message && <div className="mt-4 rounded-lg bg-[#e6f3fe] p-3 text-sm text-[#075f9f]">{message}</div>}{result && <div className="mt-4 grid gap-3 sm:grid-cols-2"><MealSnapshotCard label="변경 전" meal={result.before}/><MealSnapshotCard label={result.changed ? "변경 후" : "유지"} meal={result.after} highlight={result.changed}/></div>}<p className="mt-3 text-center text-[11px] text-black/40">완료된 변경은 레시피와 장보기 탭에도 자동으로 표시됩니다.</p></CardContent></Card></div>;
+
+  useEffect(() => {
+    if (!requestId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+      try {
+        const params = new URLSearchParams({ requestId });
+        if (request.date) params.set("date", request.date);
+        const response = await fetch(`/api/agent/meal-plan?${params}`, {
+          cache: "no-store",
+        });
+        const data = await response.json();
+        if (cancelled) return;
+        if (!response.ok) {
+          setMessage(data.error ?? "AI 작업 상태를 확인하지 못했습니다.");
+          setRequestId(null);
+          return;
+        }
+        setMessage(data.message);
+        if (data.status === "COMPLETED") {
+          if (request.action === "UPDATE_DAY") {
+            const after = (data.after ?? null) as MealSnapshot | null;
+            setResult({
+              changed: Boolean(
+                beforeSnapshot &&
+                after &&
+                JSON.stringify(beforeSnapshot) !== JSON.stringify(after),
+              ),
+              before: beforeSnapshot,
+              after,
+            });
+          }
+          setRequestId(null);
+          onPublished();
+          return;
+        }
+        if (data.status === "FAILED") {
+          setRequestId(null);
+          return;
+        }
+        timer = setTimeout(poll, 2_500);
+      } catch {
+        if (!cancelled) timer = setTimeout(poll, 5_000);
+      }
+    };
+
+    timer = setTimeout(poll, 1_000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [beforeSnapshot, onPublished, request.action, request.date, requestId]);
+  return (
+    <Dialog
+      onClose={close}
+      labelledBy="agent-dialog-title"
+      className="max-w-xl"
+    >
+      <CardContent>
+        <div className="flex items-start justify-between">
+          <div className="grid h-10 w-10 place-items-center rounded-xl bg-[#fff0d4]">
+            <Sparkles className="text-[#9a6500]" size={20} />
+          </div>
+          <button
+            data-autofocus
+            type="button"
+            onClick={close}
+            className="grid h-11 w-11 place-items-center rounded-lg text-xl text-black/50 hover:bg-black/[.05]"
+            aria-label="AI 요청 닫기"
+          >
+            ×
+          </button>
+        </div>
+        <h2
+          id="agent-dialog-title"
+          className="mt-5 text-2xl font-semibold tracking-tight"
+        >
+          AI에게 식단 검토 요청
+        </h2>
+        <p className="mt-2 text-sm leading-5 text-black/60">{description}</p>
+        <label
+          className="mt-5 block text-sm font-medium"
+          htmlFor="agent-request-prompt"
+        >
+          요청 내용
+        </label>
+        <textarea
+          id="agent-request-prompt"
+          value={prompt}
+          maxLength={4000}
+          onChange={(e) => setPrompt(e.target.value)}
+          className="mt-2 h-28 w-full resize-none rounded-lg border border-black/[.12] p-3 text-base outline-none focus:border-[#0075de] sm:text-sm"
+        />
+        <Button
+          disabled={!prompt.trim() || loading || Boolean(requestId)}
+          onClick={createPlan}
+          className="mt-3 h-11 w-full"
+        >
+          {loading || requestId ? (
+            <LoaderCircle className="animate-spin" size={16} />
+          ) : (
+            <Sparkles size={16} />
+          )}
+          {loading
+            ? "요청을 전달하고 있어요..."
+            : requestId
+              ? "백그라운드에서 처리 중"
+              : "검토 요청하기"}
+        </Button>
+        {message && (
+          <div
+            className="mt-4 rounded-lg bg-[#e6f3fe] p-3 text-sm text-[#075f9f]"
+            role="status"
+          >
+            {message}
+          </div>
+        )}
+        {result && (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <MealSnapshotCard label="변경 전" meal={result.before} />
+            <MealSnapshotCard
+              label={result.changed ? "변경 후" : "유지"}
+              meal={result.after}
+              highlight={result.changed}
+            />
+          </div>
+        )}
+        <p className="mt-3 text-center text-[11px] text-black/55">
+          요청 후 이 창을 닫아도 작업은 계속됩니다. 완료된 변경은 화면을 다시
+          열거나 새로고침하면 확인할 수 있습니다.
+        </p>
+      </CardContent>
+    </Dialog>
+  );
 }
 
-function sundayFor(date?: string) { const value = date ? new Date(`${date}T12:00:00+09:00`) : new Date(); value.setUTCDate(value.getUTCDate() - value.getUTCDay()); return value.toISOString().slice(0, 10); }
-function nextSunday() { const value = new Date(); const days = (7 - value.getDay()) % 7 || 7; value.setDate(value.getDate() + days); return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`; }
-function addDaysLocal(date: string, days: number) { const value = new Date(`${date}T12:00:00+09:00`); value.setDate(value.getDate() + days); return value.toISOString().slice(0, 10); }
-function shiftMonth(month: string, amount: number) { const [year, value] = month.split("-").map(Number); const date = new Date(Date.UTC(year, value - 1 + amount, 1)); return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`; }
-function formatMonth(month: string) { const [year, value] = month.split("-"); return `${year}년 ${Number(value)}월`; }
-function formatWeekRange(weekStart: string) { const end = addDaysLocal(weekStart, 6); return `${weekStart.slice(5).replace("-", "/")}–${end.slice(5).replace("-", "/")}`; }
-function formatRecipeDates(dates: string[]) { const ordered = [...new Set(dates)].sort(); if (!ordered.length) return "날짜 미지정"; const first = ordered[0]; const last = ordered[ordered.length - 1]; const label = (date: string) => `${date.slice(5).replace("-", "/")}(${weekdayFor(date)})`; return first === last ? label(first) : `${label(first)} – ${label(last)}`; }
-function weekdayFor(date: string) { return ["일", "월", "화", "수", "목", "금", "토"][new Date(`${date}T12:00:00+09:00`).getUTCDay()]; }
-function buildMonthDays(month: string) { const [year, value] = month.split("-").map(Number); const monthIndex = value - 1; const first = new Date(Date.UTC(year, monthIndex, 1)); const leading = first.getUTCDay(); const count = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate(); const length = Math.ceil((leading + count) / 7) * 7; return Array.from({ length }, (_, index) => { const date = new Date(Date.UTC(year, monthIndex, index - leading + 1)); return { date: date.toISOString().slice(0, 10), day: date.getUTCDate(), current: date.getUTCMonth() === monthIndex }; }); }
-function MealSnapshotCard({ label, meal, highlight = false }: { label: string; meal: MealSnapshot | null; highlight?: boolean }) {
-  return <div className={`rounded-xl border p-3 ${highlight ? "border-[#0075de]/30 bg-[#e6f3fe]" : "border-black/[.08] bg-white"}`}><p className="text-xs font-semibold text-black/40">{label}</p>{meal ? <><p className="mt-2 font-medium">주찬 · {meal.main}</p>{meal.sides.map((side) => <p key={side} className="mt-1 text-sm text-black/60">부찬 · {side}</p>)}{meal.baby && <p className="mt-2 text-xs text-black/50">아기 · {meal.baby}</p>}{meal.changeReason && <p className="mt-2 text-xs text-[#075f9f]">이유 · {meal.changeReason}</p>}</> : <p className="mt-2 text-sm text-black/45">식단 정보 없음</p>}</div>;
+function currentKstDate() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+function sundayFor(date = currentKstDate()) {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() - value.getUTCDay());
+  return value.toISOString().slice(0, 10);
+}
+function nextSunday() {
+  const today = currentKstDate();
+  const value = new Date(`${today}T00:00:00Z`);
+  const days = (7 - value.getUTCDay()) % 7 || 7;
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+function addDaysLocal(date: string, days: number) {
+  const value = new Date(`${date}T12:00:00+09:00`);
+  value.setDate(value.getDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+function shiftMonth(month: string, amount: number) {
+  const [year, value] = month.split("-").map(Number);
+  const date = new Date(Date.UTC(year, value - 1 + amount, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+function formatMonth(month: string) {
+  const [year, value] = month.split("-");
+  return `${year}년 ${Number(value)}월`;
+}
+function formatWeekRange(weekStart: string) {
+  const end = addDaysLocal(weekStart, 6);
+  return `${weekStart.slice(5).replace("-", "/")}–${end.slice(5).replace("-", "/")}`;
+}
+function formatWeekRangeLong(weekStart: string) {
+  const end = addDaysLocal(weekStart, 6);
+  return `${Number(weekStart.slice(5, 7))}월 ${Number(weekStart.slice(8))}일 – ${Number(end.slice(5, 7))}월 ${Number(end.slice(8))}일`;
+}
+function formatRecipeDates(dates: string[]) {
+  const ordered = [...new Set(dates)].sort();
+  if (!ordered.length) return "날짜 미지정";
+  const first = ordered[0];
+  const last = ordered[ordered.length - 1];
+  const label = (date: string) =>
+    `${date.slice(5).replace("-", "/")}(${weekdayFor(date)})`;
+  return first === last ? label(first) : `${label(first)} – ${label(last)}`;
+}
+function weekdayFor(date: string) {
+  return ["일", "월", "화", "수", "목", "금", "토"][
+    new Date(`${date}T12:00:00+09:00`).getUTCDay()
+  ];
+}
+function buildMonthDays(month: string) {
+  const [year, value] = month.split("-").map(Number);
+  const monthIndex = value - 1;
+  const first = new Date(Date.UTC(year, monthIndex, 1));
+  const leading = first.getUTCDay();
+  const count = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+  const length = Math.ceil((leading + count) / 7) * 7;
+  return Array.from({ length }, (_, index) => {
+    const date = new Date(Date.UTC(year, monthIndex, index - leading + 1));
+    return {
+      date: date.toISOString().slice(0, 10),
+      day: date.getUTCDate(),
+      current: date.getUTCMonth() === monthIndex,
+    };
+  });
+}
+function buildWeekDays(weekStart: string) {
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = addDaysLocal(weekStart, index);
+    return { date, day: Number(date.slice(8)), current: true };
+  });
+}
+function MealSnapshotCard({
+  label,
+  meal,
+  highlight = false,
+}: {
+  label: string;
+  meal: MealSnapshot | null;
+  highlight?: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-xl border p-3 ${highlight ? "border-[#0075de]/30 bg-[#e6f3fe]" : "border-black/[.08] bg-white"}`}
+    >
+      <p className="text-xs font-semibold text-black/40">{label}</p>
+      {meal ? (
+        <>
+          <p className="mt-2 font-medium">주찬 · {meal.main}</p>
+          {meal.sides.map((side) => (
+            <p key={side} className="mt-1 text-sm text-black/60">
+              부찬 · {side}
+            </p>
+          ))}
+          {meal.baby && (
+            <p className="mt-2 text-xs text-black/50">아기 · {meal.baby}</p>
+          )}
+          {meal.changeReason && (
+            <p className="mt-2 text-xs text-[#075f9f]">
+              이유 · {meal.changeReason}
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="mt-2 text-sm text-black/45">식단 정보 없음</p>
+      )}
+    </div>
+  );
 }

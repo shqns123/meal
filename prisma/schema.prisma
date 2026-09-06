@@ -155,6 +155,7 @@ model Expense {
 
 model AgentJob {
   id          String         @id @default(cuid())
+  requestId   String?
   weekStart   DateTime
   action      String
   status      AgentJobStatus @default(RUNNING)
@@ -165,6 +166,7 @@ model AgentJob {
   completedAt DateTime?
 
   @@index([weekStart, createdAt])
+  @@index([requestId])
 }
 
 model AgentChat {
