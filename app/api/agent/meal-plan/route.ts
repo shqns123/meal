@@ -73,7 +73,9 @@ export async function POST(request: Request) {
 }
 
 async function waitForAgentJob(weekStart: string, requestedAt: Date) {
-  const deadline = Date.now() + 165_000;
+  // Browser-verified weekly recipes can take several minutes. Keep the modal request
+  // alive long enough for Hermes to finish its final validate/publish transaction.
+  const deadline = Date.now() + 12 * 60_000;
   const startedAfter = new Date(requestedAt.getTime() - 5_000);
   const week = new Date(`${weekStart}T00:00:00+09:00`);
   while (Date.now() < deadline) {
