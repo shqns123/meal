@@ -9,7 +9,7 @@ const dbPath = process.env.MEAL_DB_PATH ?? path.join(root, "data", "mealplan.db"
 const command = process.argv[2];
 const flags = parseFlags(process.argv.slice(3));
 
-if (!command || !["context", "validate-week", "publish-week", "reply-chat", "record-review"].includes(command)) usage();
+if (!command || !["context", "validate-week", "publish-week", "publish-recipes", "validate-day", "publish-day", "rebuild-shopping", "reply-chat", "record-review"].includes(command)) usage();
 if (!fs.existsSync(dbPath)) fail(`Database not found: ${dbPath}`);
 
 const db = new DatabaseSync(dbPath);
@@ -30,6 +30,10 @@ function usage() {
   node scripts/mealctl.mjs context --week YYYY-MM-DD
   node scripts/mealctl.mjs validate-week --input /path/week.json [--week YYYY-MM-DD]
   node scripts/mealctl.mjs publish-week --input /path/week.json --week YYYY-MM-DD
+  node scripts/mealctl.mjs publish-recipes --input /path/week.json --week YYYY-MM-DD
+  node scripts/mealctl.mjs validate-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD
+  node scripts/mealctl.mjs publish-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD
+  node scripts/mealctl.mjs rebuild-shopping --week YYYY-MM-DD
   node scripts/mealctl.mjs reply-chat --id REQUEST_ID --input /path/chat-response.json
   node scripts/mealctl.mjs record-review --week YYYY-MM-DD --summary "reason"`);
   process.exit(1);
@@ -91,7 +95,7 @@ const banned = ["브로콜리", "파프리카", "피망"];
 const basicStock = new Set(["쌀", "밥", "김치", "깍두기", "소금", "설탕", "간장", "식초", "고춧가루", "고추장", "된장", "참기름", "식용유", "다진 마늘", "후추"]);
 const allowedBlogHosts = new Set(["blog.naver.com", "m.blog.naver.com"]);
 
-function validatePayload(payload, weekStart) {
+function validatePayload(payload, weekStart, scopeDate = null) {
   const errors = [];
   const warnings = ["가격 데이터가 없어 주간 예산 상한은 자동 검증하지 못합니다."];
   if (payload?.schemaVersion && payload.schemaVersion !== "meal-week.v1") errors.push("schemaVersion must be meal-week.v1.");
@@ -125,6 +129,7 @@ function validatePayload(payload, weekStart) {
       if (Object.hasOwn(change, "note")) plan.cookingNote = change.note ?? null;
     }
   }
+  if (scopeDate && (changedDates.size !== 1 || !changedDates.has(scopeDate))) errors.push(`mealChanges must contain exactly ${scopeDate} for a daily update.`);
   const coverage = new Set();
   const unitsByIngredient = new Map();
 
@@ -138,6 +143,7 @@ function validatePayload(payload, weekStart) {
     if (!Array.isArray(recipe.plannedDates) || recipe.plannedDates.length === 0) errors.push(`${at}.plannedDates is required.`);
     for (const date of recipe.plannedDates ?? []) {
       if (date < weekStart || date > addDays(weekStart, 6)) errors.push(`${at}.plannedDates contains a date outside the selected week: ${date}`);
+      if (scopeDate && date !== scopeDate) errors.push(`${at}.plannedDates must contain only ${scopeDate} for a daily update.`);
       coverage.add(`${date}|${recipe.title}`);
     }
     if (!Number.isInteger(recipe.adultServings) || recipe.adultServings < 0) errors.push(`${at}.adultServings must be a non-negative integer.`);
@@ -164,6 +170,7 @@ function validatePayload(payload, weekStart) {
 
   for (const plan of plans) {
     const date = formatKst(plan.date);
+    if (scopeDate && date !== scopeDate) continue;
     for (const dish of [plan.mainDish, ...parseJsonList(plan.sideDishes)].filter(Boolean)) if (!coverage.has(`${date}|${dish}`)) errors.push(`Missing recipe coverage for ${date}: ${dish}`);
     const day = new Date(`${date}T00:00:00Z`).getUTCDay();
     if ([0, 6].includes(day) && plan.lunchPlan && !plan.lunchPlan.includes("회사 식사")) {
@@ -173,6 +180,11 @@ function validatePayload(payload, weekStart) {
   }
   const shopping = errors.length ? [] : calculateShopping(payload.recipes, weekStart);
   return { valid: errors.length === 0, weekStart, errors, warnings, counts: { meals: plans.length, mealChanges: payload.mealChanges?.length ?? 0, recipes: payload.recipes?.length ?? 0, shoppingItems: shopping.length }, shoppingPreview: shopping };
+}
+
+function validateDay(payload, weekStart, date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < weekStart || date > addDays(weekStart, 6)) fail("--date must be inside the selected week.");
+  return validatePayload(payload, weekStart, date);
 }
 
 function normalizeName(value) { return String(value).trim().replace(/\s+/g, " "); }
@@ -207,12 +219,69 @@ function calculateShopping(recipes, weekStart) {
 }
 function round(value) { return Math.round((value + Number.EPSILON) * 100) / 100; }
 
-function publishWeek(payload, weekStart) {
+function insertRecipes(recipes, weekStart, prefix, now) {
+  const insertRecipe = db.prepare(`INSERT INTO "Recipe" ("id","title","description","prepMinutes","cookMinutes","adultServings","childServings","tags","category","plannedDates","weekKeys","instructions","babySplitStep","storageMethod","consumeWithin","sourceUrl","sourceTitle","sourceAuthor","sourceDomain","sourceCheckedAt","needsReview","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const insertIngredient = db.prepare('INSERT INTO "Ingredient" ("id","name","amount","category","recipeId") VALUES (?,?,?,?,?)');
+  const recipeIds = new Map();
+  for (const recipe of recipes) {
+    const id = `${prefix}${crypto.createHash("sha1").update(`${recipe.category}|${recipe.title}|${recipe.plannedDates.join(",")}`).digest("hex").slice(0, 12)}`;
+    recipeIds.set(recipe.title, id);
+    const sourceDomain = recipe.sourceUrl ? new URL(recipe.sourceUrl).hostname.toLowerCase() : null;
+    insertRecipe.run(id, recipe.title, recipe.description ?? null, recipe.prepMinutes, recipe.cookMinutes, recipe.adultServings, recipe.childServings, (recipe.tags ?? []).join(","), recipe.category, JSON.stringify(recipe.plannedDates), JSON.stringify([weekStart]), JSON.stringify(recipe.instructions), recipe.babySplitStep, recipe.storageMethod, recipe.consumeWithin, recipe.sourceUrl ?? null, recipe.sourceTitle ?? null, recipe.sourceAuthor ?? null, sourceDomain, recipe.sourceCheckedAt ? toMillis(recipe.sourceCheckedAt) : null, 0, now, now);
+    recipe.ingredients.forEach((ingredient, index) => insertIngredient.run(`${id}-ingredient-${index + 1}`, ingredient.name, `${ingredient.quantity}${ingredient.unit}`, ingredient.category ?? "기타", id));
+  }
+  return recipeIds;
+}
+
+function storedRecipes(weekStart) {
+  const rows = db.prepare('SELECT r."id",r."title",r."category",r."plannedDates",i."name",i."amount",i."category" AS "ingredientCategory" FROM "Recipe" r LEFT JOIN "Ingredient" i ON i."recipeId"=r."id" WHERE r."weekKeys" LIKE ? ORDER BY r."title"').all(`%${weekStart}%`);
+  const recipes = new Map();
+  for (const row of rows) {
+    const recipe = recipes.get(row.id) ?? { id: row.id, title: row.title, category: row.category, plannedDates: parseJsonList(row.plannedDates), ingredients: [] };
+    if (row.name) {
+      const match = String(row.amount ?? "").match(/^([0-9]+(?:\.[0-9]+)?)(.+)$/);
+      if (!match) fail(`Stored ingredient amount is invalid: ${row.title} / ${row.name}`);
+      recipe.ingredients.push({ name: row.name, quantity: Number(match[1]), unit: match[2], category: row.ingredientCategory ?? "기타" });
+    }
+    recipes.set(row.id, recipe);
+  }
+  return [...recipes.values()];
+}
+
+function missingStoredCoverage(weekStart) {
+  const startMs = toMillis(weekStart), endMs = toMillis(addDays(weekStart, 7));
+  const plans = db.prepare('SELECT "date","lunchPlan","mainDish","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"').all(startMs, endMs);
+  const coverage = new Set();
+  const recipes = storedRecipes(weekStart);
+  for (const recipe of recipes) for (const date of recipe.plannedDates) coverage.add(`${date}|${recipe.title}`);
+  const missing = [];
+  for (const plan of plans) {
+    const date = formatKst(plan.date);
+    for (const dish of [plan.mainDish, ...parseJsonList(plan.sideDishes)].filter(Boolean)) if (!coverage.has(`${date}|${dish}`)) missing.push(`${date}: ${dish}`);
+    const day = new Date(`${date}T00:00:00Z`).getUTCDay();
+    if ([0, 6].includes(day) && plan.lunchPlan && !plan.lunchPlan.includes("회사 식사") && !recipes.some((recipe) => recipe.category === "점심" && recipe.plannedDates.includes(date))) missing.push(`${date}: ${plan.lunchPlan} (점심)`);
+  }
+  return missing;
+}
+
+function writeShopping(weekStart, recipes, now) {
+  const shopping = calculateShopping(recipes, weekStart);
+  const weekEnd = addDays(weekStart, 6);
+  db.prepare('INSERT OR IGNORE INTO "ShoppingWeek" ("id","startDate","endDate","createdAt") VALUES (?,?,?,?)').run(`shopping-week-${weekStart}`, toMillis(weekStart), toMillis(weekEnd), now);
+  const weekRow = db.prepare('SELECT "id" FROM "ShoppingWeek" WHERE "startDate"=?').get(toMillis(weekStart));
+  const purchased = new Map(db.prepare('SELECT "name","purchased" FROM "ShoppingItem" WHERE "weekId"=?').all(weekRow.id).map((item) => [item.name, item.purchased]));
+  db.prepare('DELETE FROM "ShoppingItem" WHERE "weekId"=?').run(weekRow.id);
+  const insertShopping = db.prepare('INSERT INTO "ShoppingItem" ("id","name","quantity","unit","category","ownedQuantity","usePlan","purchased","weekId") VALUES (?,?,?,?,?,?,?,?,?)');
+  for (const item of shopping) insertShopping.run(`${weekRow.id}-${crypto.createHash("sha1").update(`${item.name}|${item.unit}`).digest("hex").slice(0, 10)}`, item.name, item.quantity, item.unit, item.category, item.ownedQuantity, item.usePlan, purchased.get(item.name) ?? 0, weekRow.id);
+  return shopping;
+}
+
+function publishWeek(payload, weekStart, rebuildShopping = true) {
   const validation = validatePayload(payload, weekStart);
   if (!validation.valid) { printJson(validation); process.exitCode = 2; return; }
   const jobId = `agent-job-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
   const now = Date.now();
-  const action = payload.mealChanges?.length ? "UPDATE_AND_PUBLISH_WEEK" : "PUBLISH_WEEK";
+  const action = payload.mealChanges?.length ? "UPDATE_AND_PUBLISH_WEEK" : rebuildShopping ? "PUBLISH_WEEK" : "PUBLISH_RECIPES";
   db.prepare('INSERT INTO "AgentJob" ("id","weekStart","action","status","inputPath","createdAt") VALUES (?,?,?,?,?,?)').run(jobId, toMillis(weekStart), action, "RUNNING", path.resolve(flags.input), now);
   const backupDir = path.join(root, "data", "backups"); fs.mkdirSync(backupDir, { recursive: true });
   const backupPath = path.join(backupDir, `mealplan-${new Date().toISOString().replace(/[:.]/g, "-")}.db`); fs.copyFileSync(dbPath, backupPath);
@@ -241,16 +310,78 @@ function publishWeek(payload, weekStart) {
     const planRows = db.prepare('SELECT "id","mainDish" FROM "MealPlan" WHERE "date">=? AND "date"<?').all(startMs, endMs);
     const linkRecipe = db.prepare('UPDATE "MealPlan" SET "recipeId"=?, "updatedAt"=? WHERE "id"=?');
     for (const plan of planRows) if (recipeIds.has(plan.mainDish)) linkRecipe.run(recipeIds.get(plan.mainDish), now, plan.id);
-    const weekEnd = addDays(weekStart, 6);
-    db.prepare('INSERT OR IGNORE INTO "ShoppingWeek" ("id","startDate","endDate","createdAt") VALUES (?,?,?,?)').run(`shopping-week-${weekStart}`, toMillis(weekStart), toMillis(weekEnd), now);
-    const weekRow = db.prepare('SELECT "id" FROM "ShoppingWeek" WHERE "startDate"=?').get(toMillis(weekStart));
-    db.prepare('DELETE FROM "ShoppingItem" WHERE "weekId"=?').run(weekRow.id);
-    const insertShopping = db.prepare('INSERT INTO "ShoppingItem" ("id","name","quantity","unit","category","ownedQuantity","usePlan","purchased","weekId") VALUES (?,?,?,?,?,?,?,?,?)');
-    for (const item of validation.shoppingPreview) insertShopping.run(`${weekRow.id}-${crypto.createHash("sha1").update(`${item.name}|${item.unit}`).digest("hex").slice(0, 10)}`, item.name, item.quantity, item.unit, item.category, item.ownedQuantity, item.usePlan, 0, weekRow.id);
-    const summary = JSON.stringify({ mealChanges: payload.mealChanges?.length ?? 0, recipes: payload.recipes.length, shoppingItems: validation.shoppingPreview.length, backup: backupPath });
+    let shoppingItems = 0;
+    if (rebuildShopping) shoppingItems = writeShopping(weekStart, payload.recipes, now).length;
+    const summary = JSON.stringify({ mealChanges: payload.mealChanges?.length ?? 0, recipes: payload.recipes.length, shoppingItems, backup: backupPath });
     db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?').run("COMPLETED", summary, Date.now(), jobId);
     db.exec("COMMIT");
-    printJson({ success: true, jobId, weekStart, backup: backupPath, mealChanges: payload.mealChanges?.length ?? 0, recipes: payload.recipes.length, shoppingItems: validation.shoppingPreview.length });
+    printJson({ success: true, jobId, weekStart, backup: backupPath, mealChanges: payload.mealChanges?.length ?? 0, recipes: payload.recipes.length, shoppingItems });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", String(error.message ?? error), Date.now(), jobId);
+    throw error;
+  }
+}
+
+function publishDay(payload, weekStart, date) {
+  const validation = validateDay(payload, weekStart, date);
+  if (!validation.valid) { printJson(validation); process.exitCode = 2; return; }
+  const jobId = `agent-day-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+  const now = Date.now();
+  db.prepare('INSERT INTO "AgentJob" ("id","weekStart","action","status","inputPath","createdAt") VALUES (?,?,?,?,?,?)').run(jobId, toMillis(weekStart), "UPDATE_DAY", "RUNNING", path.resolve(flags.input), now);
+  const backupDir = path.join(root, "data", "backups"); fs.mkdirSync(backupDir, { recursive: true });
+  const backupPath = path.join(backupDir, `mealplan-${new Date().toISOString().replace(/[:.]/g, "-")}.db`); fs.copyFileSync(dbPath, backupPath);
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    const change = payload.mealChanges[0];
+    const current = db.prepare('SELECT "id","lunchPlan","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?').get(toMillis(date));
+    db.prepare('UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=NULL,"updatedAt"=? WHERE "id"=?').run(Object.hasOwn(change, "lunch") ? change.lunch ?? null : current.lunchPlan, change.main, JSON.stringify(change.sides), Object.hasOwn(change, "baby") ? change.baby ?? null : current.babyMenu, Object.hasOwn(change, "note") ? change.note ?? null : current.cookingNote, payload.changeReason, now, current.id);
+
+    const oldRecipes = db.prepare('SELECT "id","plannedDates" FROM "Recipe" WHERE "weekKeys" LIKE ? AND "plannedDates" LIKE ?').all(`%${weekStart}%`, `%${date}%`);
+    const unlink = db.prepare('UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=?');
+    const trimDates = db.prepare('UPDATE "Recipe" SET "plannedDates"=?,"updatedAt"=? WHERE "id"=?');
+    const deleteRecipe = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
+    for (const recipe of oldRecipes) {
+      const dates = parseJsonList(recipe.plannedDates).filter((value) => value !== date);
+      unlink.run(recipe.id);
+      if (dates.length) trimDates.run(JSON.stringify(dates), now, recipe.id);
+      else deleteRecipe.run(recipe.id);
+    }
+    const recipeIds = insertRecipes(payload.recipes, weekStart, `generated-${weekStart}-${date}-`, now);
+    const mainRecipeId = recipeIds.get(change.main);
+    if (mainRecipeId) db.prepare('UPDATE "MealPlan" SET "recipeId"=?,"updatedAt"=? WHERE "id"=?').run(mainRecipeId, now, current.id);
+    const shopping = writeShopping(weekStart, storedRecipes(weekStart), now);
+    const summary = JSON.stringify({ mealChanges: 1, recipes: payload.recipes.length, shoppingItems: shopping.length, backup: backupPath });
+    db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?').run("COMPLETED", summary, Date.now(), jobId);
+    db.exec("COMMIT");
+    printJson({ success: true, jobId, weekStart, date, backup: backupPath, mealChanges: 1, recipes: payload.recipes.length, shoppingItems: shopping.length });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", String(error.message ?? error), Date.now(), jobId);
+    throw error;
+  }
+}
+
+function rebuildShopping(weekStart) {
+  const jobId = `agent-shopping-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+  const now = Date.now();
+  db.prepare('INSERT INTO "AgentJob" ("id","weekStart","action","status","createdAt") VALUES (?,?,?,?,?)').run(jobId, toMillis(weekStart), "REBUILD_SHOPPING", "RUNNING", now);
+  const missing = missingStoredCoverage(weekStart);
+  if (missing.length) {
+    const error = `레시피가 아직 준비되지 않은 메뉴가 있습니다: ${missing.join(", ")}`;
+    db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", error, Date.now(), jobId);
+    printJson({ success: false, jobId, weekStart, missing });
+    process.exitCode = 2;
+    return;
+  }
+  const backupDir = path.join(root, "data", "backups"); fs.mkdirSync(backupDir, { recursive: true });
+  const backupPath = path.join(backupDir, `mealplan-${new Date().toISOString().replace(/[:.]/g, "-")}.db`); fs.copyFileSync(dbPath, backupPath);
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    const shopping = writeShopping(weekStart, storedRecipes(weekStart), now);
+    db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?').run("COMPLETED", JSON.stringify({ shoppingItems: shopping.length, backup: backupPath }), Date.now(), jobId);
+    db.exec("COMMIT");
+    printJson({ success: true, jobId, weekStart, shoppingItems: shopping.length, backup: backupPath });
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}
     db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", String(error.message ?? error), Date.now(), jobId);
@@ -289,6 +420,15 @@ try {
     if (!result.valid) process.exitCode = 2;
   }
   if (command === "publish-week") publishWeek(readPayload(flags.input), requireWeek(flags.week));
+  if (command === "publish-recipes") publishWeek(readPayload(flags.input), requireWeek(flags.week), false);
+  if (command === "validate-day") {
+    const payload = readPayload(flags.input);
+    const result = validateDay(payload, requireWeek(flags.week ?? payload.weekStart), flags.date);
+    printJson(result);
+    if (!result.valid) process.exitCode = 2;
+  }
+  if (command === "publish-day") publishDay(readPayload(flags.input), requireWeek(flags.week), flags.date);
+  if (command === "rebuild-shopping") rebuildShopping(requireWeek(flags.week));
   if (command === "reply-chat") replyChat(readPayload(flags.input), flags.id);
   if (command === "record-review") recordReview(requireWeek(flags.week), flags.summary);
 } finally {
