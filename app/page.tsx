@@ -110,6 +110,12 @@ type WeeklyReviewRequest = {
   referenceDate: string;
   prompt: string;
 };
+type PendingAgentJob = {
+  requestId: string;
+  action: AgentRequest["action"];
+  date?: string;
+};
+type PendingAgentChat = { id: string };
 const nav = [
   [CalendarDays, "이 달의 식단"],
   [BookOpen, "레시피"],
@@ -139,6 +145,11 @@ export default function Home() {
     sundayFor(currentKstDate()),
   );
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [pendingJobs, setPendingJobs] = useState<PendingAgentJob[]>([]);
+  const [pendingChats, setPendingChats] = useState<PendingAgentChat[]>([]);
+  const [appNotice, setAppNotice] = useState<string | null>(null);
+  const pendingJobsLoaded = useRef(false);
+  const pendingChatsLoaded = useRef(false);
   const currentWeek = sundayFor(currentKstDate());
   const dataWeek =
     active === "레시피" || (active === "이 달의 식단" && view === "week")
@@ -168,6 +179,54 @@ export default function Home() {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [dataWeek, selectedMonth, refreshVersion]);
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("meal-pending-ai-jobs") ?? "[]");
+      if (Array.isArray(saved)) setPendingJobs(saved.filter((item): item is PendingAgentJob => item && typeof item.requestId === "string" && typeof item.action === "string"));
+    } catch {
+      localStorage.removeItem("meal-pending-ai-jobs");
+    } finally {
+      pendingJobsLoaded.current = true;
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("meal-pending-ai-chats") ?? "[]");
+      if (Array.isArray(saved)) setPendingChats(saved.filter((item): item is PendingAgentChat => item && typeof item.id === "string"));
+    } catch {
+      localStorage.removeItem("meal-pending-ai-chats");
+    } finally {
+      pendingChatsLoaded.current = true;
+    }
+  }, []);
+  useEffect(() => {
+    if (pendingJobsLoaded.current) localStorage.setItem("meal-pending-ai-jobs", JSON.stringify(pendingJobs));
+  }, [pendingJobs]);
+  useEffect(() => {
+    if (pendingChatsLoaded.current) localStorage.setItem("meal-pending-ai-chats", JSON.stringify(pendingChats));
+  }, [pendingChats]);
+  useEffect(() => {
+    if (!appNotice) return;
+    const timeout = window.setTimeout(() => setAppNotice(null), 7_000);
+    return () => window.clearTimeout(timeout);
+  }, [appNotice]);
+
+  const queueAgentJob = useCallback((job: PendingAgentJob) => {
+    setPendingJobs((current) => current.some((item) => item.requestId === job.requestId) ? current : [...current, job]);
+  }, []);
+  const finishAgentJob = useCallback((requestId: string, message: string) => {
+    setPendingJobs((current) => current.filter((item) => item.requestId !== requestId));
+    setRefreshVersion((version) => version + 1);
+    setAppNotice(message);
+  }, []);
+  const queueAgentChat = useCallback((chat: PendingAgentChat) => {
+    setPendingChats((current) => current.some((item) => item.id === chat.id) ? current : [...current, chat]);
+  }, []);
+  const finishAgentChat = useCallback((id: string, message: string) => {
+    setPendingChats((current) => current.filter((item) => item.id !== id));
+    setAppNotice(message);
+  }, []);
 
   const openDay = (date: string) => {
     setSelectedWeek(sundayFor(date));
@@ -383,11 +442,116 @@ export default function Home() {
           request={agentRequest}
           close={() => setAgentRequest(null)}
           onPublished={() => setRefreshVersion((version) => version + 1)}
+          onQueued={queueAgentJob}
         />
       )}
-      {chatOpen && <ChatModal close={() => setChatOpen(false)} />}
+      {chatOpen && <ChatModal close={() => setChatOpen(false)} onQueued={queueAgentChat} />}
+      <AgentCompletionMonitor jobs={pendingJobs} onFinished={finishAgentJob} />
+      <AgentChatCompletionMonitor chats={pendingChats} onFinished={finishAgentChat} />
+      <NotificationPermissionPrompt />
+      {appNotice && <InAppNotice message={appNotice} close={() => setAppNotice(null)} />}
     </main>
   );
+}
+
+function AgentCompletionMonitor({ jobs, onFinished }: { jobs: PendingAgentJob[]; onFinished: (requestId: string, message: string) => void }) {
+  useEffect(() => {
+    if (!jobs.length) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      const results = await Promise.all(jobs.map(async (job) => {
+        try {
+          const params = new URLSearchParams({ requestId: job.requestId });
+          if (job.date) params.set("date", job.date);
+          const response = await fetch(`/api/agent/meal-plan?${params}`, { cache: "no-store" });
+          if (!response.ok) return null;
+          const data = (await response.json()) as { status?: string; message?: string };
+          return data.status === "COMPLETED" || data.status === "FAILED" ? { requestId: job.requestId, message: data.message ?? "AI 작업이 완료되었습니다." } : null;
+        } catch { return null; }
+      }));
+      if (cancelled) return;
+      results.filter(Boolean).forEach((result) => onFinished(result!.requestId, result!.message));
+      if (!cancelled) timer = window.setTimeout(poll, 3_000);
+    };
+    void poll();
+    return () => { cancelled = true; if (timer) window.clearTimeout(timer); };
+  }, [jobs, onFinished]);
+  return null;
+}
+
+function AgentChatCompletionMonitor({ chats, onFinished }: { chats: PendingAgentChat[]; onFinished: (id: string, message: string) => void }) {
+  useEffect(() => {
+    if (!chats.length) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      const results = await Promise.all(chats.map(async (chat) => {
+        try {
+          const response = await fetch(`/api/agent/meal-chat?id=${encodeURIComponent(chat.id)}`, { cache: "no-store" });
+          if (!response.ok) return null;
+          const data = (await response.json()) as { status?: string; error?: string };
+          return data.status === "COMPLETED" || data.status === "FAILED" ? { id: chat.id, message: data.status === "COMPLETED" ? "AI 답변이 도착했습니다." : (data.error ?? "AI 답변을 완료하지 못했습니다.") } : null;
+        } catch { return null; }
+      }));
+      if (cancelled) return;
+      results.filter(Boolean).forEach((result) => onFinished(result!.id, result!.message));
+      if (!cancelled) timer = window.setTimeout(poll, 3_000);
+    };
+    void poll();
+    return () => { cancelled = true; if (timer) window.clearTimeout(timer); };
+  }, [chats, onFinished]);
+  return null;
+}
+
+function NotificationPermissionPrompt() {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  useEffect(() => {
+    if (localStorage.getItem("meal-push-choice") || !window.isSecureContext || !("Notification" in window) || Notification.permission !== "default") return;
+    fetch("/api/push/config").then((response) => response.ok ? response.json() : null).then((data) => setOpen(Boolean(data?.configured && data.publicKey))).catch(() => undefined);
+  }, []);
+  const subscribe = async () => {
+    setBusy(true); setMessage("");
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") { localStorage.setItem("meal-push-choice", "denied"); setOpen(false); return; }
+      const config = await fetch("/api/push/config").then((response) => { if (!response.ok) throw new Error("알림 설정을 불러오지 못했습니다."); return response.json() as Promise<{ publicKey: string }>; });
+      const registration = await navigator.serviceWorker.register("/push-worker.js");
+      const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(config.publicKey) });
+      const response = await fetch("/api/push/subscription", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(subscription) });
+      if (!response.ok) throw new Error("알림 수신 등록에 실패했습니다.");
+      localStorage.setItem("meal-push-choice", "granted"); setOpen(false);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "알림 수신 등록에 실패했습니다."); }
+    finally { setBusy(false); }
+  };
+  if (!open) return null;
+  const dismiss = () => { localStorage.setItem("meal-push-choice", "later"); setOpen(false); };
+  return (
+    <Dialog onClose={dismiss} labelledBy="push-permission-title" className="max-w-md">
+      <CardContent className="p-6">
+        <div className="grid h-10 w-10 place-items-center rounded-xl bg-[#e6f3fe] text-[#0075de]"><MessageCircle size={20} /></div>
+        <h2 id="push-permission-title" className="mt-4 text-xl font-semibold tracking-tight">AI 작업 완료 알림을 받을까요?</h2>
+        <p className="mt-2 text-sm leading-6 text-black/60">식단·레시피·장보기 작업이 끝나면 앱을 닫아도 이 기기로 알려드려요.</p>
+        {message && <p className="mt-3 text-sm text-[#b42318]" role="status">{message}</p>}
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button variant="ghost" disabled={busy} onClick={dismiss}>나중에</Button>
+          <Button disabled={busy} onClick={() => void subscribe()}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Check size={16} />}알림 받기</Button>
+        </div>
+      </CardContent>
+    </Dialog>
+  );
+}
+
+function InAppNotice({ message, close }: { message: string; close: () => void }) {
+  return <div role="status" className="fixed bottom-5 right-5 z-[60] flex max-w-[calc(100vw-2.5rem)] items-start gap-3 rounded-xl border border-black/[.08] bg-white px-4 py-3 text-sm text-black/75 shadow-[0_8px_24px_rgba(0,0,0,.12)]"><Sparkles className="mt-0.5 shrink-0 text-[#0075de]" size={17} /><p>{message}</p><button type="button" onClick={close} className="-mr-1 -mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-black/45 hover:bg-black/[.05]" aria-label="알림 닫기"><X size={16} /></button></div>;
+}
+
+function urlBase64ToUint8Array(value: string) {
+  const padded = `${value}${"=".repeat((4 - (value.length % 4)) % 4)}`.replace(/-/g, "+").replace(/_/g, "/");
+  const raw = window.atob(padded);
+  return Uint8Array.from(raw, (character) => character.charCodeAt(0));
 }
 
 function PageTitle({
@@ -1701,7 +1865,7 @@ function ScheduleCheck({
     </label>
   );
 }
-function ChatModal({ close }: { close: () => void }) {
+function ChatModal({ close, onQueued }: { close: () => void; onQueued: (chat: PendingAgentChat) => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: "assistant",
@@ -1739,6 +1903,7 @@ function ChatModal({ close }: { close: () => void }) {
         throw new Error(
           data.message ?? data.error ?? "AI가 답변을 처리하지 못했습니다.",
         );
+      onQueued({ id: data.id });
       const deadline = Date.now() + 95_000;
       let result: {
         status?: string;
@@ -1908,10 +2073,12 @@ function AgentModal({
   request,
   close,
   onPublished,
+  onQueued,
 }: {
   request: AgentRequest;
   close: () => void;
   onPublished: () => void;
+  onQueued: (job: PendingAgentJob) => void;
 }) {
   const [prompt, setPrompt] = useState(request.prompt);
   const [message, setMessage] = useState("");
@@ -1955,6 +2122,7 @@ function AgentModal({
       if (response.ok && data.requestId) {
         setBeforeSnapshot(data.before ?? null);
         setRequestId(data.requestId);
+        onQueued({ requestId: data.requestId, action: request.action, date: request.date });
       }
     } catch {
       setMessage("AI에 연결할 수 없습니다.");

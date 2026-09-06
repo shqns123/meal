@@ -41,6 +41,28 @@ Use the returned meals, schedules, family needs, pantry, weekly review, existing
 
 ## Webhook task routing
 
+### `publish_next_month` — next calendar month menu only
+
+- The target month is the `targetMonth:` value in the web-app metadata. For a scheduled run without metadata, calculate the next calendar month yourself.
+- A scheduled run may publish only when today is the Friday immediately before the calendar week containing the next month's first day. Otherwise make no database change and finish with a brief skip reason.
+- Read the monthly context first. If the target month already has `existingMonthMeals`, do not overwrite it; report that it is already planned.
+
+```bash
+node scripts/mealctl.mjs context-month --month YYYY-MM
+```
+
+- Create every date in the target calendar month exactly once. Include a concrete lunch plan, one adult dinner main, two dinner sides, optional baby difference, and a short reuse/cooking note for each date.
+- This is a calendar-only step: do **not** search blogs, generate recipes, or create shopping items for the entire month. Weekly recipe regeneration remains responsible for recipes and shopping for the selected week.
+- Compare the monthly context's `previousMonth` and `recentMonths` before choosing mains. `previousMonth` is the strict no-identical-main reference; `recentMonths` is a variety reference only. Respect all pantry, attendance, allergy, baby, banned-ingredient, repetition, and adult/child split-cooking rules in `MEAL.md`.
+- Validate and publish only after the full month JSON is ready:
+
+```bash
+node scripts/mealctl.mjs validate-month --input /tmp/meal-month-YYYY-MM.json --month YYYY-MM
+node scripts/mealctl.mjs publish-month --input /tmp/meal-month-YYYY-MM.json --month YYYY-MM --request-id REQUEST_ID
+```
+
+When the request has no `requestId`, omit the final `--request-id` flag. After a web-app request succeeds, run `node scripts/mealctl.mjs notify-web --request-id REQUEST_ID`.
+
 ### `update_meal_day` — one date only
 
 - Change only the requested `date`. Do not alter other dates, even if their recipes are missing.
@@ -110,4 +132,12 @@ node scripts/mealctl.mjs record-review --week YYYY-MM-DD --summary "reason the p
 
 ## Completion
 
-After any successful publishing command, run `context` again for the same week. Report the returned `jobId`, changed scope, recipe count, shopping-item count, and backup path. If searching, validation, or publishing fails, report the exact blocker and state that SQLite was not updated.
+After any successful publishing or review command, notify the web app before the final response:
+
+```bash
+node scripts/mealctl.mjs notify-web --request-id REQUEST_ID
+```
+
+`notify-web` is non-destructive and does not alter the meal result. If it reports a warning, keep the successful publishing result, report the warning, and do not rerun publishing.
+
+Then run `context` again for the same week. Report the returned `jobId`, changed scope, recipe count, shopping-item count, and backup path. If searching, validation, or publishing fails, report the exact blocker and state that SQLite was not updated.

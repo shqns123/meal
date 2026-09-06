@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -14,14 +15,18 @@ if (
   !command ||
   ![
     "context",
+    "context-month",
     "validate-week",
+    "validate-month",
     "publish-week",
+    "publish-month",
     "publish-recipes",
     "validate-day",
     "publish-day",
     "rebuild-shopping",
     "reply-chat",
     "record-review",
+    "notify-web",
   ].includes(command)
 )
   usage();
@@ -45,14 +50,19 @@ function parseFlags(args) {
 function usage() {
   console.error(`Usage:
   node scripts/mealctl.mjs context --week YYYY-MM-DD
+  node scripts/mealctl.mjs context-month --month YYYY-MM
   node scripts/mealctl.mjs validate-week --input /path/week.json [--week YYYY-MM-DD]
+  node scripts/mealctl.mjs validate-month --input /path/month.json --month YYYY-MM
   node scripts/mealctl.mjs publish-week --input /path/week.json --week YYYY-MM-DD [--request-id ID]
+  node scripts/mealctl.mjs publish-month --input /path/month.json --month YYYY-MM [--request-id ID]
   node scripts/mealctl.mjs publish-recipes --input /path/week.json --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs validate-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD
   node scripts/mealctl.mjs publish-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs rebuild-shopping --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs reply-chat --id REQUEST_ID --input /path/chat-response.json
-  node scripts/mealctl.mjs record-review --week YYYY-MM-DD --summary "reason" [--request-id ID]`);
+  node scripts/mealctl.mjs record-review --week YYYY-MM-DD --summary "reason" [--request-id ID]
+  node scripts/mealctl.mjs notify-web --request-id REQUEST_ID
+  node scripts/mealctl.mjs notify-web --chat-id REQUEST_ID`);
   process.exit(1);
 }
 
@@ -70,6 +80,30 @@ function requireWeek(value) {
   if (Number.isNaN(date.valueOf()) || date.getUTCDay() !== 0)
     fail("--week must be a Sunday.");
   return value;
+}
+function requireMonth(value) {
+  if (!/^\d{4}-\d{2}$/.test(value ?? "")) fail("--month must be YYYY-MM.");
+  const [year, month] = value.split("-").map(Number);
+  if (month < 1 || month > 12 || !Number.isInteger(year))
+    fail("--month must be a real calendar month.");
+  return value;
+}
+function monthStart(month) {
+  return `${requireMonth(month)}-01`;
+}
+function daysInMonth(month) {
+  const [year, value] = requireMonth(month).split("-").map(Number);
+  return new Date(Date.UTC(year, value, 0)).getUTCDate();
+}
+function monthDates(month) {
+  return Array.from({ length: daysInMonth(month) }, (_, index) =>
+    addDays(monthStart(month), index),
+  );
+}
+function sundayFor(date) {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() - value.getUTCDay());
+  return value.toISOString().slice(0, 10);
 }
 function toMillis(date) {
   return Date.parse(`${date}T00:00:00+09:00`);
@@ -221,6 +255,36 @@ function loadContext(weekStart) {
           sourceCheckedAt: "YYYY-MM-DD",
         },
       ],
+    },
+  };
+}
+
+function loadMonthContext(month) {
+  const selectedMonth = requireMonth(month);
+  const dates = monthDates(selectedMonth);
+  const start = dates[0];
+  const endExclusive = addDays(dates.at(-1), 1);
+  const [year, numericMonth] = selectedMonth.split("-").map(Number);
+  const previousMonth = `${numericMonth === 1 ? year - 1 : year}-${String(numericMonth === 1 ? 12 : numericMonth - 1).padStart(2, "0")}`;
+  const monthMeals = db.prepare('SELECT "date","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote" FROM "MealPlan" WHERE "monthKey"=? ORDER BY "date"').all(selectedMonth);
+  const previousMeals = db.prepare('SELECT "date","mainDish","sideDishes" FROM "MealPlan" WHERE "monthKey"=? ORDER BY "date"').all(previousMonth);
+  const recentMeals = db.prepare('SELECT "monthKey","date","mainDish","sideDishes" FROM "MealPlan" WHERE "monthKey">=? AND "monthKey"<? ORDER BY "date"').all(shiftMonth(selectedMonth, -3), selectedMonth);
+  const schedules = db.prepare('SELECT s."date",s."lunchNotAtHome",s."dinnerNotAtHome",m."name" AS "memberName",m."role" AS "memberRole" FROM "FamilySchedule" s JOIN "FamilyMember" m ON m."id"=s."memberId" WHERE s."date">=? AND s."date"<? ORDER BY s."date"').all(toMillis(start), toMillis(endExclusive));
+  return {
+    schemaVersion: "meal-month.v1",
+    month: selectedMonth,
+    dates,
+    timezone: "Asia/Seoul",
+    rules: { agents: path.join(root, "AGENTS.md"), meal: path.join(root, "MEAL.md") },
+    family: db.prepare('SELECT "id","name","role","allergies","chewingAbility","spiceTolerance","dietaryNotes" FROM "FamilyMember" ORDER BY "role"').all(),
+    pantry: db.prepare('SELECT * FROM "PantryItem" ORDER BY CASE WHEN "expiresAt" IS NULL THEN 1 ELSE 0 END, "expiresAt", "name"').all(),
+    schedules: schedules.map((item) => ({ ...item, date: formatKst(item.date) })),
+    existingMonthMeals: monthMeals.map((item) => ({ ...item, date: formatKst(item.date), sides: parseJsonList(item.sideDishes) })),
+    previousMonth: { month: previousMonth, meals: previousMeals.map((item) => ({ ...item, date: formatKst(item.date), sides: parseJsonList(item.sideDishes) })) },
+    recentMonths: recentMeals.map((item) => ({ ...item, date: formatKst(item.date), sides: parseJsonList(item.sideDishes) })),
+    outputContract: {
+      changeReason: "string",
+      mealChanges: [{ date: "YYYY-MM-DD", lunch: "string", main: "string", sides: ["side 1", "side 2"], baby: "optional string", note: "optional string" }],
     },
   };
 }
@@ -440,6 +504,58 @@ function validateDay(payload, weekStart, date) {
   )
     fail("--date must be inside the selected week.");
   return validatePayload(payload, weekStart, date);
+}
+
+function validateMonth(payload, month) {
+  const selectedMonth = requireMonth(month);
+  const dates = monthDates(selectedMonth);
+  const errors = [];
+  if (payload?.schemaVersion && payload.schemaVersion !== "meal-month.v1")
+    errors.push("schemaVersion must be meal-month.v1.");
+  if (payload?.month !== selectedMonth)
+    errors.push(`month must be ${selectedMonth}.`);
+  if (!String(payload?.changeReason ?? "").trim())
+    errors.push("changeReason is required.");
+  if (!Array.isArray(payload?.mealChanges)) errors.push("mealChanges must be an array.");
+  const changes = payload?.mealChanges ?? [];
+  const changedDates = new Set();
+  const mainDishes = new Set();
+  for (const [index, change] of changes.entries()) {
+    const at = `mealChanges[${index}]`;
+    if (!dates.includes(change.date)) errors.push(`${at}.date must be inside ${selectedMonth}.`);
+    if (changedDates.has(change.date)) errors.push(`${at}.date is duplicated.`);
+    changedDates.add(change.date);
+    if (!String(change.lunch ?? "").trim()) errors.push(`${at}.lunch is required.`);
+    if (!String(change.main ?? "").trim()) errors.push(`${at}.main is required.`);
+    const normalizedMain = normalizeName(change.main);
+    if (mainDishes.has(normalizedMain)) errors.push(`${at}.main is duplicated in this month: ${normalizedMain}.`);
+    mainDishes.add(normalizedMain);
+    if (!Array.isArray(change.sides) || change.sides.length !== 2 || change.sides.some((side) => !String(side).trim()))
+      errors.push(`${at}.sides must contain exactly two named side dishes.`);
+    if (Array.isArray(change.sides) && new Set(change.sides.map(normalizeName)).size !== change.sides.length)
+      errors.push(`${at}.sides must not contain duplicates.`);
+    for (const item of banned)
+      if (JSON.stringify(change).includes(item)) errors.push(`${at} contains banned ingredient: ${item}`);
+  }
+  if (changedDates.size !== dates.length)
+    errors.push(`mealChanges must contain every day of ${selectedMonth} exactly once.`);
+  const existing = db.prepare('SELECT "date" FROM "MealPlan" WHERE "monthKey"=?').all(selectedMonth);
+  if (existing.length) errors.push(`${selectedMonth} already has ${existing.length} saved meal plans and will not be overwritten.`);
+  const previousMonth = previousMonthKey(selectedMonth);
+  const previousMains = new Set(db.prepare('SELECT "mainDish" FROM "MealPlan" WHERE "monthKey"=?').all(previousMonth).map((row) => row.mainDish ? normalizeName(row.mainDish) : "").filter(Boolean));
+  for (const main of mainDishes)
+    if (previousMains.has(main)) errors.push(`main dish '${main}' repeats the previous month.`);
+  return { valid: errors.length === 0, month: selectedMonth, errors, counts: { mealChanges: changes.length } };
+}
+
+function previousMonthKey(month) {
+  const [year, numericMonth] = requireMonth(month).split("-").map(Number);
+  return `${numericMonth === 1 ? year - 1 : year}-${String(numericMonth === 1 ? 12 : numericMonth - 1).padStart(2, "0")}`;
+}
+function shiftMonth(month, amount) {
+  const [year, numericMonth] = requireMonth(month).split("-").map(Number);
+  const value = new Date(Date.UTC(year, numericMonth - 1 + amount, 1));
+  return `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
 function normalizeName(value) {
@@ -759,6 +875,62 @@ function failQueuedAgentJob(requestId, error) {
   db.prepare(
     `UPDATE "AgentJob" SET "status"='FAILED',"error"=?,"completedAt"=? WHERE "requestId"=? AND "status"='RUNNING'`,
   ).run(String(error).slice(0, 2000), Date.now(), requestId);
+}
+
+function publishMonth(payload, month, requestId = null) {
+  const selectedMonth = requireMonth(month);
+  const validation = validateMonth(payload, selectedMonth);
+  if (!validation.valid) {
+    failQueuedAgentJob(requestId, validation.errors.join("; "));
+    printJson(validation);
+    process.exitCode = 2;
+    return;
+  }
+  const now = Date.now();
+  const jobId = beginAgentJob({
+    prefix: "agent-month",
+    requestId,
+    weekStart: sundayFor(monthStart(selectedMonth)),
+    action: "PUBLISH_MONTH",
+    inputPath: path.resolve(flags.input),
+    now,
+  });
+  const backupDir = path.join(root, "data", "backups");
+  fs.mkdirSync(backupDir, { recursive: true });
+  const backupPath = path.join(backupDir, `mealplan-${new Date().toISOString().replace(/[:.]/g, "-")}.db`);
+  fs.copyFileSync(dbPath, backupPath);
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    const insertPlan = db.prepare('INSERT INTO "MealPlan" ("id","date","monthKey","mealType","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote","changeReason","adultServings","childServings","dinnerDiningOut","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    for (const change of payload.mealChanges) {
+      const date = String(change.date);
+      insertPlan.run(
+        `month-${date}-${crypto.randomBytes(3).toString("hex")}`,
+        toMillis(date),
+        selectedMonth,
+        "DINNER",
+        String(change.lunch).trim(),
+        String(change.main).trim(),
+        JSON.stringify(change.sides.map((side) => String(side).trim())),
+        String(change.baby ?? "").trim() || null,
+        String(change.note ?? "").trim() || null,
+        String(payload.changeReason).trim().slice(0, 2_000),
+        2,
+        1,
+        false,
+        now,
+        now,
+      );
+    }
+    const summary = JSON.stringify({ mealChanges: payload.mealChanges.length, recipes: 0, shoppingItems: 0, backup: backupPath, month: selectedMonth });
+    db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?').run("COMPLETED", summary, Date.now(), jobId);
+    db.exec("COMMIT");
+    printJson({ success: true, jobId, month: selectedMonth, mealChanges: payload.mealChanges.length, recipes: 0, shoppingItems: 0, backup: backupPath });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", String(error.message ?? error), Date.now(), jobId);
+    throw error;
+  }
 }
 
 function publishWeek(
@@ -1158,14 +1330,61 @@ function recordReview(weekStart, summary, requestId = null) {
   printJson({ success: true, jobId, weekStart, maintained: true });
 }
 
+function notifyWeb({ requestId, chatId }) {
+  if (Boolean(requestId) === Boolean(chatId))
+    fail("Provide exactly one of --request-id or --chat-id.");
+  const url = process.env.MEAL_APP_NOTIFY_URL?.trim();
+  const token = process.env.MEAL_APP_NOTIFY_TOKEN?.trim();
+  if (!url || !token) {
+    printJson({ success: true, skipped: true, reason: "MEAL_APP_NOTIFY_URL or MEAL_APP_NOTIFY_TOKEN is not configured." });
+    return;
+  }
+  let endpoint;
+  try {
+    endpoint = new URL(url);
+  } catch {
+    fail("MEAL_APP_NOTIFY_URL must be a valid URL.");
+  }
+  if (!/^https?:$/.test(endpoint.protocol))
+    fail("MEAL_APP_NOTIFY_URL must use http or https.");
+  const body = requestId ? { requestId } : { chatId };
+  const code = `
+const [url, token, body] = process.argv.slice(1);
+fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + token }, body })
+  .then(async (response) => { const text = await response.text(); if (!response.ok) throw new Error("Notification callback returned " + response.status + ": " + text); process.stdout.write(text); })
+  .catch((error) => { console.error(error.message); process.exit(1); });`;
+  const result = spawnSync(
+    process.execPath,
+    ["-e", code, url, token, JSON.stringify(body)],
+    { encoding: "utf8", timeout: 15_000 },
+  );
+  if (result.status !== 0) {
+    // Notification delivery must never invalidate a successfully published meal.
+    printJson({ success: true, notified: false, warning: String(result.stderr || result.error?.message || "Notification callback failed.").trim() });
+    return;
+  }
+  try {
+    printJson({ success: true, notified: true, callback: JSON.parse(result.stdout) });
+  } catch {
+    printJson({ success: true, notified: true });
+  }
+}
+
 try {
   if (command === "context") printJson(loadContext(requireWeek(flags.week)));
+  if (command === "context-month") printJson(loadMonthContext(requireMonth(flags.month)));
   if (command === "validate-week") {
     const payload = readPayload(flags.input);
     const result = validatePayload(
       payload,
       requireWeek(flags.week ?? payload.weekStart),
     );
+    printJson(result);
+    if (!result.valid) process.exitCode = 2;
+  }
+  if (command === "validate-month") {
+    const payload = readPayload(flags.input);
+    const result = validateMonth(payload, requireMonth(flags.month ?? payload.month));
     printJson(result);
     if (!result.valid) process.exitCode = 2;
   }
@@ -1176,6 +1395,8 @@ try {
       true,
       flags["request-id"],
     );
+  if (command === "publish-month")
+    publishMonth(readPayload(flags.input), requireMonth(flags.month), flags["request-id"]);
   if (command === "publish-recipes")
     publishWeek(
       readPayload(flags.input),
@@ -1205,6 +1426,8 @@ try {
   if (command === "reply-chat") replyChat(readPayload(flags.input), flags.id);
   if (command === "record-review")
     recordReview(requireWeek(flags.week), flags.summary, flags["request-id"]);
+  if (command === "notify-web")
+    notifyWeb({ requestId: flags["request-id"], chatId: flags["chat-id"] });
 } finally {
   db.close();
 }

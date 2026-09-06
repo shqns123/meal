@@ -164,6 +164,7 @@ model AgentJob {
   error       String?
   createdAt   DateTime       @default(now())
   completedAt DateTime?
+  notifiedAt  DateTime?
 
   @@index([weekStart, createdAt])
   @@index([requestId])
@@ -178,8 +179,18 @@ model AgentChat {
   error       String?
   createdAt   DateTime @default(now())
   completedAt DateTime?
+  notifiedAt  DateTime?
 
   @@index([createdAt])
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model WeeklyReview {

@@ -11,7 +11,8 @@
     "import:september": "node scripts/import-september.mjs",
     "db:agent-migrate": "node scripts/migrate-agent-workflow.mjs",
     "db:attendance-migrate": "node scripts/migrate-attendance.mjs",
-    "mealctl": "node scripts/mealctl.mjs"
+    "mealctl": "node scripts/mealctl.mjs",
+    "push:keys": "node scripts/generate-vapid-keys.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.6.0",
@@ -21,13 +22,15 @@
     "next": "^15.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "tailwind-merge": "^3.2.0"
+    "tailwind-merge": "^3.2.0",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.0",
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/web-push": "^3.6.4",
     "eslint": "^9.39.5",
     "eslint-config-next": "^15.5.25",
     "prisma": "^6.6.0",

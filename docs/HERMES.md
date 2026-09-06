@@ -8,6 +8,8 @@
 environment:
   MEAL_PLAN_ROOT: /opt/data/meal
   MEAL_DB_PATH: /opt/data/meal/data/mealplan.db
+  MEAL_APP_NOTIFY_URL: http://192.168.0.18:7000/api/push/notify
+  MEAL_APP_NOTIFY_TOKEN: 앱의 MEAL_APP_NOTIFY_TOKEN과-같은-임의의-긴-값
   TZ: Asia/Seoul
 volumes:
   - /volume1/docker/Meal:/opt/data/meal:ro
@@ -64,7 +66,26 @@ AGENT_WEBHOOK_TOKEN=충분히-긴-임의의-비밀값
 
 웹앱은 JSON 본문을 `AGENT_WEBHOOK_TOKEN`으로 HMAC-SHA256 서명해 `X-Webhook-Signature` 헤더로 보낸다. 외부 인터넷에 webhook 포트를 직접 공개하지 않는다.
 
-날짜별 수정 요청은 `task: update_meal_day`로 전달된다. Hermes는 주간 게시 JSON의 `mealChanges`에 요청받은 날짜만 넣고, 그 주의 레시피와 장보기를 함께 재계산한 뒤 `publish-week`를 한 번 실행한다. 웹훅 처리가 끝나면 웹앱 API가 SQLite에서 같은 날짜를 다시 읽어 모달에 변경 전·후 결과를 반환한다. Hermes가 유지하기로 판단하면 두 결과가 동일하게 표시된다.
+날짜별 수정 요청은 `task: update_meal_day`로 전달된다. Hermes는 요청받은 날짜 하나만 `mealChanges`에 넣고 `publish-day`로 해당 날짜의 레시피·장보기만 다시 계산한다. 웹훅 처리가 끝나면 웹앱 API가 SQLite에서 같은 날짜를 다시 읽어 모달에 변경 전·후 결과를 반환한다. Hermes가 유지하기로 판단하면 두 결과가 동일하게 표시된다.
+
+## AI 완료 푸시 알림
+
+앱을 연 상태에서는 브라우저 권한과 무관하게 화면 오른쪽 아래에 완료 알림이 표시된다. 앱을 닫은 뒤 받는 기기 알림은 Web Push이므로 **HTTPS 주소**(또는 개발용 `localhost`)에서만 등록할 수 있다. NAS IP의 `http://192.168...` 주소로 접속하면 브라우저 보안 정책상 기기 푸시를 받을 수 없다. Synology Reverse Proxy와 인증서로 `https://식탁.도메인` 주소를 먼저 만든다.
+
+웹앱 `.env`에 VAPID 키와 콜백 토큰을 넣는다. 키는 로컬에서 한 번만 생성하고 비밀 키는 Git에 올리지 않는다.
+
+```bash
+npm run push:keys
+```
+
+```env
+NEXT_PUBLIC_VAPID_PUBLIC_KEY=생성된_publicKey
+VAPID_PRIVATE_KEY=생성된_privateKey
+VAPID_SUBJECT=mailto:본인@example.com
+MEAL_APP_NOTIFY_TOKEN=openssl-rand-hex-32로-만든-값
+```
+
+Hermes 컨테이너에도 같은 `MEAL_APP_NOTIFY_TOKEN`과 웹앱 콜백 URL을 환경 변수로 넣는다. `meal-planner`와 `meal-chat` 스킬은 저장 성공 후 `mealctl notify-web`을 실행해 이 URL로 완료 신호를 보낸다. 콜백이 실패해도 이미 저장된 식단 작업을 되돌리지는 않는다.
 
 ## 일요일 확인 작업
 
@@ -78,6 +99,25 @@ hermes cron create "0 20 * * 0" \
 ```
 
 초기 레시피 보강처럼 검색량이 큰 작업은 Cron 한 번에 모두 처리하지 말고 10~20개씩 나눈다.
+
+## 다음 달 월간 식단 생성
+
+Hermes Cron에 매주 금요일 18:00(Asia/Seoul)로 한 작업을 만든다. Cron 자체는 매주 실행하지만, 아래 프롬프트가 **다음 달 1일이 포함된 달력 주의 직전 금요일**에만 월간 식단을 게시하므로 날짜를 매달 수정할 필요가 없다. 예를 들어 다음 달 첫 주가 이번 달 마지막 일요일에 시작하면 그 이틀 전 금요일에 생성된다.
+
+- 이름: `다음 달 월간 식단 생성`
+- 스케줄: `0 18 * * 5`
+- 스킬: `meal-planner`
+- 도구: `terminal`, `skills` (웹 검색은 이 작업에 필요 없음)
+
+```text
+Asia/Seoul 현재 날짜를 기준으로 다음 달 1일이 포함된 달력 주의 직전 금요일인지 판단한다. 해당하지 않으면 SQLite를 수정하지 말고, 실행을 건너뛴 이유만 간단히 남긴다.
+
+해당하면 다음 달을 대상으로 meal-planner 스킬을 사용한다. AGENTS.md와 MEAL.md를 전체 읽고, context-month로 대상 월·직전 월 식단·보유 재료·가족 일정부터 확인한다. 대상 월에 식단이 이미 있으면 덮어쓰지 말고 종료한다.
+
+대상 달의 모든 날짜에 점심, 저녁 주찬 1개, 부찬 2개, 필요한 아기 차이 메뉴와 재활용 메모를 구체적으로 구성한다. 직전 월 주찬과 중복하지 말고, 월 안에서도 주찬 중복과 인접한 단백질·조리법 편중을 피한다. 보유 재료, 가족 식사 여부, 금지 재료와 아기 분리 조리 규칙을 반영한다.
+
+월간 캘린더만 validate-month와 publish-month로 게시한다. 이 작업에서 블로그 검색, 레시피 생성, 장보기 생성은 하지 않는다. 레시피·장보기는 기존 주간 작업에서 해당 주차별로 생성한다.
+```
 
 ## 명령 확인
 

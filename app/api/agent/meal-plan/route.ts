@@ -10,12 +10,14 @@ type MealPlanRequest = {
     | "UPDATE_DAY"
     | "REVIEW_WEEK"
     | "REGENERATE_RECIPES"
-    | "REGENERATE_GROCERY";
+    | "REGENERATE_GROCERY"
+    | "PUBLISH_MONTH";
   date?: string;
   weekStart?: string;
   family?: { name: string; dietaryNotes?: string }[];
   startDate?: string;
   days?: number;
+  targetMonth?: string;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -27,6 +29,7 @@ const ACTION_LABELS: Record<string, string> = {
   PUBLISH_RECIPES: "주간 레시피 재생성",
   REBUILD_SHOPPING: "주간 장보기 재생성",
   WEEKLY_REVIEW_MAINTAINED: "주간 식단 점검",
+  PUBLISH_MONTH: "다음 달 식단 생성",
 };
 
 export async function POST(request: Request) {
@@ -90,6 +93,8 @@ export async function POST(request: Request) {
           ? "regenerate_week_recipes"
           : action === "REGENERATE_GROCERY"
             ? "regenerate_week_grocery"
+            : action === "PUBLISH_MONTH"
+              ? "publish_next_month"
             : "publish_week_recipes";
   const payload = {
     task,
@@ -101,10 +106,12 @@ export async function POST(request: Request) {
       task,
       weekStart,
       date: body.date,
+      targetMonth: body.targetMonth,
       userPrompt: body.prompt,
     }),
     date: body.date,
     weekStart,
+    targetMonth: body.targetMonth,
     family: body.family ?? [],
     startDate: body.startDate,
     days: body.days ?? 7,
@@ -167,12 +174,14 @@ function buildAgentPrompt({
   task,
   weekStart,
   date,
+  targetMonth,
   userPrompt,
 }: {
   requestId: string;
   task: string;
   weekStart: string;
   date?: string;
+  targetMonth?: string;
   userPrompt: string;
 }) {
   return [
@@ -181,6 +190,7 @@ function buildAgentPrompt({
     `task: ${task}`,
     `weekStart: ${weekStart}`,
     ...(date ? [`date: ${date}`] : []),
+    ...(targetMonth ? [`targetMonth: ${targetMonth}`] : []),
     "",
     "[사용자 요청]",
     userPrompt.trim(),
@@ -260,12 +270,16 @@ function validateRequest(body: MealPlanRequest) {
     !/^\d{4}-\d{2}-\d{2}$/.test(body.date ?? "")
   )
     return "일일 식단 수정에는 올바른 날짜가 필요합니다.";
+  if (body.action === "PUBLISH_MONTH" && !isRealMonth(body.targetMonth ?? ""))
+    return "월간 식단 생성에는 올바른 대상 월이 필요합니다.";
   const weekStart = resolveWeekStart(body);
   if (!weekStart) return "올바른 주 시작 날짜가 필요합니다.";
   return null;
 }
 
 function resolveWeekStart(body: MealPlanRequest) {
+  if (body.action === "PUBLISH_MONTH" && body.targetMonth)
+    return sundayFor(`${body.targetMonth}-01`);
   if (body.weekStart) {
     if (!isRealDate(body.weekStart)) return null;
     const value = new Date(`${body.weekStart}T00:00:00Z`);
@@ -273,6 +287,12 @@ function resolveWeekStart(body: MealPlanRequest) {
   }
   const basis = body.date ?? body.startDate;
   return basis && isRealDate(basis) ? sundayFor(basis) : sundayFor();
+}
+
+function isRealMonth(value: string) {
+  if (!/^\d{4}-\d{2}$/.test(value)) return false;
+  const [year, month] = value.split("-").map(Number);
+  return Number.isInteger(year) && month >= 1 && month <= 12;
 }
 
 function isRealDate(value: string) {

@@ -49,9 +49,10 @@ Use this skill only for the `meal_chat` webhook route. It is a read-only convers
    { "answer": "Korean answer for the owner", "sources": [{ "title": "optional source title", "url": "https://example.com" }] }
    JSON
    node scripts/mealctl.mjs reply-chat --id REQUEST_ID --input /tmp/meal-chat-REQUEST_ID.json
+   node scripts/mealctl.mjs notify-web --chat-id REQUEST_ID
    ```
 
-   Replace `REQUEST_ID` with the actual value. Run this once, only after the answer is ready.
+   Replace `REQUEST_ID` with the actual value. Run `reply-chat` once, only after the answer is ready, then run `notify-web` so a subscribed device can receive the completed answer.
 
 ## Response contract
 
