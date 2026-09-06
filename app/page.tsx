@@ -183,7 +183,7 @@ export default function Home() {
 
   useEffect(() => {
     if (window.isSecureContext && "serviceWorker" in navigator)
-      void navigator.serviceWorker.register("/push-worker.js");
+      void navigator.serviceWorker.register("/push-worker.js").catch(() => undefined);
   }, []);
 
   useEffect(() => {

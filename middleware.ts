@@ -1,7 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const cookieName = "meal_session";
-const publicPaths = new Set(["/login", "/api/auth/login", "/api/auth/logout", "/api/push/notify", "/push-worker.js"]);
+const publicPaths = new Set([
+  "/login",
+  "/api/auth/login",
+  "/api/auth/logout",
+  "/api/push/notify",
+  "/push-worker.js",
+  "/manifest.webmanifest",
+  "/icon.svg",
+]);
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
