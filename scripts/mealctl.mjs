@@ -233,26 +233,27 @@ function insertRecipes(recipes, weekStart, prefix, now) {
   return recipeIds;
 }
 
-function storedRecipes(weekStart) {
+function storedRecipes(weekStart, { skipInvalid = false } = {}) {
   const rows = db.prepare('SELECT r."id",r."title",r."category",r."plannedDates",i."name",i."amount",i."category" AS "ingredientCategory" FROM "Recipe" r LEFT JOIN "Ingredient" i ON i."recipeId"=r."id" WHERE r."weekKeys" LIKE ? ORDER BY r."title"').all(`%${weekStart}%`);
   const recipes = new Map();
   for (const row of rows) {
-    const recipe = recipes.get(row.id) ?? { id: row.id, title: row.title, category: row.category, plannedDates: parseJsonList(row.plannedDates), ingredients: [] };
+    const recipe = recipes.get(row.id) ?? { id: row.id, title: row.title, category: row.category, plannedDates: parseJsonList(row.plannedDates), ingredients: [], invalidIngredient: false };
     if (row.name) {
       const match = String(row.amount ?? "").match(/^([0-9]+(?:\.[0-9]+)?)(.+)$/);
-      if (!match) fail(`Stored ingredient amount is invalid: ${row.title} / ${row.name}`);
-      recipe.ingredients.push({ name: row.name, quantity: Number(match[1]), unit: match[2], category: row.ingredientCategory ?? "기타" });
+      if (!match) recipe.invalidIngredient = true;
+      else recipe.ingredients.push({ name: row.name, quantity: Number(match[1]), unit: match[2], category: row.ingredientCategory ?? "기타" });
     }
     recipes.set(row.id, recipe);
   }
-  return [...recipes.values()];
+  return [...recipes.values()].filter((recipe) => !skipInvalid || !recipe.invalidIngredient);
 }
 
 function missingStoredCoverage(weekStart) {
   const startMs = toMillis(weekStart), endMs = toMillis(addDays(weekStart, 7));
   const plans = db.prepare('SELECT "date","lunchPlan","mainDish","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"').all(startMs, endMs);
   const coverage = new Set();
-  const recipes = storedRecipes(weekStart);
+  const allRecipes = storedRecipes(weekStart);
+  const recipes = allRecipes.filter((recipe) => !recipe.invalidIngredient);
   for (const recipe of recipes) for (const date of recipe.plannedDates) coverage.add(`${date}|${recipe.title}`);
   const missing = [];
   for (const plan of plans) {
@@ -261,6 +262,7 @@ function missingStoredCoverage(weekStart) {
     const day = new Date(`${date}T00:00:00Z`).getUTCDay();
     if ([0, 6].includes(day) && plan.lunchPlan && !plan.lunchPlan.includes("회사 식사") && !recipes.some((recipe) => recipe.category === "점심" && recipe.plannedDates.includes(date))) missing.push(`${date}: ${plan.lunchPlan} (점심)`);
   }
+  for (const recipe of allRecipes.filter((recipe) => recipe.invalidIngredient)) for (const date of recipe.plannedDates) missing.push(`${date}: ${recipe.title} (재료 수량 형식 오류)`);
   return missing;
 }
 
@@ -350,11 +352,12 @@ function publishDay(payload, weekStart, date) {
     const recipeIds = insertRecipes(payload.recipes, weekStart, `generated-${weekStart}-${date}-`, now);
     const mainRecipeId = recipeIds.get(change.main);
     if (mainRecipeId) db.prepare('UPDATE "MealPlan" SET "recipeId"=?,"updatedAt"=? WHERE "id"=?').run(mainRecipeId, now, current.id);
-    const shopping = writeShopping(weekStart, storedRecipes(weekStart), now);
-    const summary = JSON.stringify({ mealChanges: 1, recipes: payload.recipes.length, shoppingItems: shopping.length, backup: backupPath });
+    const skippedLegacyRecipes = storedRecipes(weekStart).filter((recipe) => recipe.invalidIngredient).map((recipe) => recipe.title);
+    const shopping = writeShopping(weekStart, storedRecipes(weekStart, { skipInvalid: true }), now);
+    const summary = JSON.stringify({ mealChanges: 1, recipes: payload.recipes.length, shoppingItems: shopping.length, skippedLegacyRecipes, backup: backupPath });
     db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?').run("COMPLETED", summary, Date.now(), jobId);
     db.exec("COMMIT");
-    printJson({ success: true, jobId, weekStart, date, backup: backupPath, mealChanges: 1, recipes: payload.recipes.length, shoppingItems: shopping.length });
+    printJson({ success: true, jobId, weekStart, date, backup: backupPath, mealChanges: 1, recipes: payload.recipes.length, shoppingItems: shopping.length, skippedLegacyRecipes });
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}
     db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", String(error.message ?? error), Date.now(), jobId);
