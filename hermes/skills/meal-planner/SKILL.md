@@ -28,9 +28,21 @@ Use this skill when a scheduled run or the owner asks Hermes to prepare, update,
 - Never copy a blog post or its images verbatim. Adapt ingredient amounts and cooking steps in original wording and retain the source attribution.
 - A failed validation is not permission to weaken the rules. Correct the JSON and validate again.
 
+## Mandatory execution gate
+
+For every `update_meal_day` or `publish_week_recipes` webhook request, a conversational response is **not** completion. Do not say that a menu was checked, selected, changed, or ready until the required `mealctl` commands have actually run.
+
+1. Run `context` with the requested week before any web search.
+2. Research and prepare the required JSON.
+3. Run `validate-week` and correct every error.
+4. Run `publish-week` successfully.
+5. Run `context` once more to confirm the data is present.
+
+Only then give a short completion report including the `jobId`. If a terminal command, source verification, or validation fails, stop and report the concrete failure instead; never substitute a researched recommendation for a published update.
+
 ## Procedure
 
-1. Set the project path and selected Sunday:
+1. Set the project path and selected Sunday **as the first tool action**:
 
    ```bash
    export MEAL_PLAN_ROOT=/opt/data/meal

@@ -51,7 +51,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Hermes could not publish the meal update", message: "Hermes가 식단 반영에 실패했습니다. Hermes 로그를 확인해 주세요.", upstream: result }, { status: 502 });
     }
     if ((body.action === "UPDATE_DAY" || body.action === "PUBLISH_WEEK") && !job) {
-      return NextResponse.json({ accepted: true, pending: true, message: "Hermes가 레시피와 장보기를 검증하며 식단을 처리하고 있습니다. 완료 후 페이지를 새로고침해 확인해 주세요.", result: body.date ? { changed: false, before, after } : null, upstream: result });
+      return NextResponse.json({ error: "Meal update was not published", message: "Hermes가 식단을 검토했지만 SQLite에 게시 작업을 완료하지 않았습니다. Hermes 로그에서 mealctl validate-week 및 publish-week 실행 여부를 확인해 주세요.", result: body.date ? { changed: false, before, after } : null, upstream: result }, { status: 502 });
     }
     const message = body.action === "UPDATE_DAY"
       ? changed ? "Hermes가 식단을 수정했습니다." : "Hermes가 검토했지만 이 날짜의 식단은 유지했습니다."

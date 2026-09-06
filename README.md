@@ -35,3 +35,5 @@ docker compose exec app npx prisma db push
 `AGENT_WEBHOOK_URL`에 Hermes 또는 Codex를 호출하는 중계 서버 URL을 넣습니다. 요청은 식단 생성·수정 작업을 보냅니다.
 
 사이드바의 **Hermes에게 물어보기** 채팅은 별도의 읽기 전용 웹훅을 사용합니다. 식단을 바꾸지 않고 DB 정보를 답하거나, 필요할 때 웹 검색 결과를 출처와 함께 보여 줍니다. NAS Hermes 설정은 [HERMES_CHAT_SETUP.md](HERMES_CHAT_SETUP.md)를 참고하세요.
+
+날짜별 식단 수정은 검색 결과만 제안하지 않고 `mealctl`을 통해 SQLite에 게시해야 완료됩니다. 웹훅 프롬프트 설정은 [HERMES_MEAL_PLAN_SETUP.md](HERMES_MEAL_PLAN_SETUP.md)를 참고하세요.
