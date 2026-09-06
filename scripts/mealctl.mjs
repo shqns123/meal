@@ -296,8 +296,11 @@ function publishWeek(payload, weekStart, rebuildShopping = true) {
       const current = findPlan.get(toMillis(change.date));
       updatePlan.run(Object.hasOwn(change, "lunch") ? change.lunch ?? null : current.lunchPlan, change.main, JSON.stringify(change.sides), Object.hasOwn(change, "baby") ? change.baby ?? null : current.babyMenu, Object.hasOwn(change, "note") ? change.note ?? null : current.cookingNote, payload.changeReason, now, current.id);
     }
-    db.prepare('UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId" LIKE ?').run(`${prefix}%`);
-    db.prepare('DELETE FROM "Recipe" WHERE "id" LIKE ?').run(`${prefix}%`);
+    // A weekly regeneration is an authoritative replacement for that week.
+    // Older data did not always use the generated ID prefix, so scope cleanup by
+    // the persisted week key rather than leaving stale recipes visible.
+    db.prepare('UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId" IN (SELECT "id" FROM "Recipe" WHERE "weekKeys" LIKE ?)').run(`%${weekStart}%`);
+    db.prepare('DELETE FROM "Recipe" WHERE "weekKeys" LIKE ?').run(`%${weekStart}%`);
     const insertRecipe = db.prepare(`INSERT INTO "Recipe" ("id","title","description","prepMinutes","cookMinutes","adultServings","childServings","tags","category","plannedDates","weekKeys","instructions","babySplitStep","storageMethod","consumeWithin","sourceUrl","sourceTitle","sourceAuthor","sourceDomain","sourceCheckedAt","needsReview","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     const insertIngredient = db.prepare('INSERT INTO "Ingredient" ("id","name","amount","category","recipeId") VALUES (?,?,?,?,?)');
     const recipeIds = new Map();

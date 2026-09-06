@@ -55,7 +55,7 @@ node scripts/mealctl.mjs publish-day --input /tmp/meal-day-YYYY-MM-DD.json --wee
 
 `publish-day` replaces that date's recipes and recalculates the shopping list from stored recipes. It intentionally does not require recipe coverage for other dates.
 
-### `regenerate_week_recipes` or `publish_week_recipes` — recipes only
+### `regenerate_week_recipes` — recipes only
 
 - Keep every meal-plan date unchanged. Do not add `mealChanges`.
 - Generate verified recipes for every dinner main and side dish in the selected Sunday–Saturday week, plus home-meal weekend lunches.
@@ -67,7 +67,20 @@ node scripts/mealctl.mjs validate-week --input /tmp/meal-week-YYYY-MM-DD.json --
 node scripts/mealctl.mjs publish-recipes --input /tmp/meal-week-YYYY-MM-DD.json --week YYYY-MM-DD
 ```
 
-This replaces the selected week's recipe set. It does not modify the calendar menu or shopping list; use the separate shopping regeneration after recipes are ready.
+This replaces every stored recipe associated with the selected week, including legacy recipes that used a different ID format. It does not modify the calendar menu or shopping list; use the separate shopping regeneration after recipes are ready.
+
+### `publish_week_recipes` and scheduled cron runs — recipes and shopping
+
+- A scheduled run without an explicit `task` is this full weekly workflow.
+- Keep every meal-plan date unchanged. Generate and verify the complete selected week's recipes using the same recipe requirements above.
+- Validate and publish in one transaction:
+
+```bash
+node scripts/mealctl.mjs validate-week --input /tmp/meal-week-YYYY-MM-DD.json --week YYYY-MM-DD
+node scripts/mealctl.mjs publish-week --input /tmp/meal-week-YYYY-MM-DD.json --week YYYY-MM-DD
+```
+
+`publish-week` replaces all recipes associated with the selected week and recalculates that week's shopping list from the newly published recipes, after pantry and basic-staple deductions. It does not change calendar menu dates.
 
 ### `regenerate_week_grocery` — shopping only
 
