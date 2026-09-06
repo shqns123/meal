@@ -139,10 +139,15 @@ export default function Home() {
     sundayFor(currentKstDate()),
   );
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const currentWeek = sundayFor(currentKstDate());
+  const dataWeek =
+    active === "레시피" || (active === "이 달의 식단" && view === "week")
+      ? currentWeek
+      : selectedWeek;
 
   useEffect(() => {
     const load = () =>
-      fetch(`/api/meal-data?month=${selectedMonth}&week=${selectedWeek}`)
+      fetch(`/api/meal-data?month=${selectedMonth}&week=${dataWeek}`)
         .then((response) =>
           response.ok
             ? response.json()
@@ -162,7 +167,7 @@ export default function Home() {
     const onFocus = () => load();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [selectedMonth, selectedWeek, refreshVersion]);
+  }, [dataWeek, selectedMonth, refreshVersion]);
 
   const openDay = (date: string) => {
     setSelectedWeek(sundayFor(date));
@@ -310,9 +315,8 @@ export default function Home() {
               view={view}
               setView={setView}
               month={selectedMonth}
-              weekStart={selectedWeek}
+              weekStart={currentWeek}
               onChangeMonth={changeMonth}
-              onChangeWeek={changeWeek}
               meals={mealItems}
               onOpenDay={openDay}
               onEditDay={(date) => {
@@ -329,13 +333,12 @@ export default function Home() {
           {active === "레시피" && (
             <Recipes
               recipes={recipes}
-              weekStart={selectedWeek}
-              onChangeWeek={changeWeek}
+              weekStart={currentWeek}
               onRegenerate={() =>
                 setAgentRequest({
                   action: "REGENERATE_RECIPES",
-                  weekStart: selectedWeek,
-                  prompt: `${selectedWeek}부터 ${addDaysLocal(selectedWeek, 6)}까지의 식단 메뉴는 변경하지 말고, 이 주차의 주찬·부찬·필요한 주말 점심 레시피만 새로 생성해줘. 해당 주차에 속하지 않는 기존 레시피는 건드리지 말고, 각 메뉴마다 실제로 확인한 블로그 원문을 근거로 정확한 분량, 번호 조리 순서, 아기 분리 조리, 보관 방법을 작성해 전체 주차 검증 후 게시해줘. 장보기는 이 요청에서 변경하지 마.`,
+                  weekStart: currentWeek,
+                  prompt: `${currentWeek}부터 ${addDaysLocal(currentWeek, 6)}까지의 식단 메뉴는 변경하지 말고, 이 주차의 주찬·부찬·필요한 주말 점심 레시피만 새로 생성해줘. 해당 주차에 속하지 않는 기존 레시피는 건드리지 말고, 각 메뉴마다 실제로 확인한 블로그 원문을 근거로 정확한 분량, 번호 조리 순서, 아기 분리 조리, 보관 방법을 작성해 전체 주차 검증 후 게시해줘. 장보기는 이 요청에서 변경하지 마.`,
                 })
               }
             />
@@ -414,7 +417,7 @@ function WeekActions({
   onRegenerate,
   regenerateLabel,
 }: {
-  onChangeWeek: (amount: number) => void;
+  onChangeWeek?: (amount: number) => void;
   onRegenerate: () => void;
   regenerateLabel: string;
 }) {
@@ -422,26 +425,30 @@ function WeekActions({
     "grid h-11 w-11 place-items-center rounded-lg border border-black/[.08] bg-white text-black/60 transition-colors hover:bg-[#e6f3fe] hover:text-[#0075de] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40";
   return (
     <div className="flex items-center gap-1">
-      <button
-        type="button"
-        onClick={() => onChangeWeek(-1)}
-        className={controlClass}
-        aria-label="이전 주"
-      >
-        <ChevronLeft size={17} />
-      </button>
-      <button
-        type="button"
-        onClick={() => onChangeWeek(1)}
-        className={controlClass}
-        aria-label="다음 주"
-      >
-        <ChevronRight size={17} />
-      </button>
+      {onChangeWeek && (
+        <>
+          <button
+            type="button"
+            onClick={() => onChangeWeek(-1)}
+            className={controlClass}
+            aria-label="이전 주"
+          >
+            <ChevronLeft size={17} />
+          </button>
+          <button
+            type="button"
+            onClick={() => onChangeWeek(1)}
+            className={controlClass}
+            aria-label="다음 주"
+          >
+            <ChevronRight size={17} />
+          </button>
+        </>
+      )}
       <button
         type="button"
         onClick={onRegenerate}
-        className={`${controlClass} ml-1`}
+        className={`${controlClass} ${onChangeWeek ? "ml-1" : ""}`}
         title={regenerateLabel}
         aria-label={regenerateLabel}
       >
@@ -456,7 +463,6 @@ function MealPlanner({
   month,
   weekStart,
   onChangeMonth,
-  onChangeWeek,
   meals,
   onOpenDay,
   onEditDay,
@@ -466,13 +472,11 @@ function MealPlanner({
   month: string;
   weekStart: string;
   onChangeMonth: (amount: number) => void;
-  onChangeWeek: (amount: number) => void;
   meals: Meal[];
   onOpenDay: (date: string) => void;
   onEditDay: (date: string) => void;
 }) {
   const weekDays = buildWeekDays(weekStart);
-  const change = view === "month" ? onChangeMonth : onChangeWeek;
   const periodLabel =
     view === "month" ? formatMonth(month) : formatWeekRangeLong(weekStart);
   return (
@@ -507,25 +511,29 @@ function MealPlanner({
       <Card className="overflow-hidden">
         <div className="flex items-center border-b border-black/[.08] px-4 py-3 sm:px-5">
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => change(-1)}
-              className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
-              aria-label={view === "month" ? "이전 달" : "이전 주"}
-            >
-              <ChevronLeft size={18} />
-            </button>
+            {view === "month" && (
+              <button
+                type="button"
+                onClick={() => onChangeMonth(-1)}
+                className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+                aria-label="이전 달"
+              >
+                <ChevronLeft size={18} />
+              </button>
+            )}
             <h2 className="min-w-[126px] text-center font-semibold tabular-nums sm:min-w-[150px]">
               {periodLabel}
             </h2>
-            <button
-              type="button"
-              onClick={() => change(1)}
-              className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
-              aria-label={view === "month" ? "다음 달" : "다음 주"}
-            >
-              <ChevronRight size={18} />
-            </button>
+            {view === "month" && (
+              <button
+                type="button"
+                onClick={() => onChangeMonth(1)}
+                className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+                aria-label="다음 달"
+              >
+                <ChevronRight size={18} />
+              </button>
+            )}
           </div>
         </div>
         {view === "month" ? (
@@ -621,6 +629,7 @@ function MonthView({
           <div
             className={`calendar-cell ${cell.current ? "" : "bg-black/[.015] text-black/30"}`}
             key={`${cell.date}-${index}`}
+            onDoubleClick={() => cell.current && onOpenDay(cell.date)}
           >
             <button
               type="button"
@@ -703,6 +712,7 @@ function WeekView({
           <div
             key={cell.date}
             className="min-h-[420px] border-r border-black/[.08] p-3 last:border-0"
+            onDoubleClick={() => onOpenDay(cell.date)}
           >
             <button
               type="button"
@@ -729,12 +739,10 @@ function WeekView({
 function Recipes({
   recipes,
   weekStart,
-  onChangeWeek,
   onRegenerate,
 }: {
   recipes: Recipe[];
   weekStart: string;
-  onChangeWeek: (amount: number) => void;
   onRegenerate: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -754,7 +762,6 @@ function Recipes({
     <>
       <PageTitle label={`${formatWeekRange(weekStart)} 레시피`} title="레시피">
         <WeekActions
-          onChangeWeek={onChangeWeek}
           onRegenerate={onRegenerate}
           regenerateLabel="이번 주 레시피 재생성"
         />

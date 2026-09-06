@@ -81,18 +81,28 @@ export async function POST(request: Request) {
     },
   });
 
+  const task =
+    action === "UPDATE_DAY"
+      ? "update_meal_day"
+      : action === "REVIEW_WEEK"
+        ? "review_week_plan"
+        : action === "REGENERATE_RECIPES"
+          ? "regenerate_week_recipes"
+          : action === "REGENERATE_GROCERY"
+            ? "regenerate_week_grocery"
+            : "publish_week_recipes";
   const payload = {
-    task:
-      action === "UPDATE_DAY"
-        ? "update_meal_day"
-        : action === "REVIEW_WEEK"
-          ? "review_week_plan"
-          : action === "REGENERATE_RECIPES"
-            ? "regenerate_week_recipes"
-            : action === "REGENERATE_GROCERY"
-              ? "regenerate_week_grocery"
-              : "publish_week_recipes",
-    prompt: body.prompt,
+    task,
+    // Hermes turns only the prompt field into the agent's message. Keep the
+    // request ID in that visible message as well as the JSON envelope so its
+    // final mealctl command can mark this exact web job as complete.
+    prompt: buildAgentPrompt({
+      requestId,
+      task,
+      weekStart,
+      date: body.date,
+      userPrompt: body.prompt,
+    }),
     date: body.date,
     weekStart,
     family: body.family ?? [],
@@ -150,6 +160,31 @@ export async function POST(request: Request) {
     },
     { status: 202 },
   );
+}
+
+function buildAgentPrompt({
+  requestId,
+  task,
+  weekStart,
+  date,
+  userPrompt,
+}: {
+  requestId: string;
+  task: string;
+  weekStart: string;
+  date?: string;
+  userPrompt: string;
+}) {
+  return [
+    "[웹앱 작업 메타데이터 — 최종 mealctl 명령에 반드시 사용]",
+    `requestId: ${requestId}`,
+    `task: ${task}`,
+    `weekStart: ${weekStart}`,
+    ...(date ? [`date: ${date}`] : []),
+    "",
+    "[사용자 요청]",
+    userPrompt.trim(),
+  ].join("\n");
 }
 
 export async function GET(request: Request) {
