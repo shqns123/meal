@@ -1,10 +1,12 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { isRateLimited } from "@/lib/rate-limit";
+import { openRouterConfigured, queueOpenRouterTask } from "@/lib/openrouter-worker";
 
 type ChatRequest = {
   message?: string;
+  targetMonth?: string;
   conversation?: { role: "user" | "assistant"; content: string }[];
 };
 
@@ -31,14 +33,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "message is required" }, { status: 400 });
   if (message.length > 2_000)
     return NextResponse.json({ error: "message is too long" }, { status: 400 });
+  if (body.targetMonth && !/^\d{4}-(0[1-9]|1[0-2])$/.test(body.targetMonth))
+    return NextResponse.json(
+      { error: "선택한 월이 올바르지 않습니다." },
+      { status: 400 },
+    );
 
-  const webhookUrl = process.env.AGENT_CHAT_WEBHOOK_URL;
-  const token = process.env.AGENT_CHAT_WEBHOOK_TOKEN;
-  if (!webhookUrl || !token) {
+  if (!openRouterConfigured()) {
     return NextResponse.json(
       {
-        error: "Chat agent is not connected",
-        message: "Hermes 채팅 연결이 아직 설정되지 않았습니다.",
+        error: "OpenRouter chat is not connected",
+        message: "OpenRouter API 키와 모델 설정을 확인해 주세요.",
       },
       { status: 503 },
     );
@@ -57,46 +62,55 @@ export async function POST(request: Request) {
     }));
   const requestId = randomUUID();
   await prisma.agentChat.create({ data: { id: requestId, question: message } });
-  const payload = JSON.stringify({
-    task: "meal_chat",
-    requestId,
-    message,
-    conversation,
-    readOnly: true,
-    requestedAt: new Date().toISOString(),
-  });
-  const signature = createHmac("sha256", token).update(payload).digest("hex");
-
   try {
-    const upstream = await fetch(webhookUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Webhook-Signature": signature,
-        "X-Request-ID": randomUUID(),
-      },
-      body: payload,
-      signal: AbortSignal.timeout(90_000),
+    queueOpenRouterTask({
+      kind: "chat",
+      requestId,
+      message,
+      conversation,
+      targetMonth: body.targetMonth ?? currentKstMonth(),
+      weekStart: sundayForKst(),
     });
-    if (!upstream.ok) throw new Error("Agent request failed");
     return NextResponse.json({ id: requestId, pending: true }, { status: 202 });
   } catch {
     await prisma.agentChat.update({
       where: { id: requestId },
       data: {
         status: "FAILED",
-        error: "Hermes에 연결할 수 없습니다.",
+        error: "OpenRouter 작업을 시작하지 못했습니다.",
         completedAt: new Date(),
       },
     });
     return NextResponse.json(
       {
-        error: "Agent request failed",
-        message: "Hermes에 연결할 수 없습니다.",
+        error: "OpenRouter request failed",
+        message: "AI 작업을 시작하지 못했습니다. 연결 상태를 확인해 주세요.",
       },
       { status: 502 },
     );
   }
+}
+
+function currentKstMonth() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+  })
+    .format(new Date())
+    .slice(0, 7);
+}
+
+function sundayForKst() {
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const date = new Date(`${today}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - date.getUTCDay());
+  return date.toISOString().slice(0, 10);
 }
 
 export async function GET(request: Request) {
@@ -120,7 +134,7 @@ export async function GET(request: Request) {
     );
   if (
     chat.status === "RUNNING" &&
-    Date.now() - chat.createdAt.getTime() > 2 * 60_000
+    Date.now() - chat.createdAt.getTime() > 10 * 60_000
   ) {
     const expired = await prisma.agentChat.update({
       where: { id },
@@ -148,7 +162,7 @@ export async function GET(request: Request) {
           /^https?:\/\//.test(source.url),
       );
   } catch {
-    /* Hermes answer remains readable even if its source list is malformed. */
+    /* Keep an otherwise useful AI answer readable if its source list is malformed. */
   }
   return NextResponse.json({
     status: chat.status,

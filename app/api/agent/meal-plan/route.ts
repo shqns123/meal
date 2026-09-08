@@ -1,7 +1,8 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { isRateLimited } from "@/lib/rate-limit";
+import { openRouterConfigured, queueOpenRouterTask } from "@/lib/openrouter-worker";
 
 type MealPlanRequest = {
   prompt: string;
@@ -53,13 +54,11 @@ export async function POST(request: Request) {
   if (validationError)
     return NextResponse.json({ error: validationError }, { status: 400 });
 
-  const webhookUrl = process.env.AGENT_WEBHOOK_URL;
-  const token = process.env.AGENT_WEBHOOK_TOKEN;
-  if (!webhookUrl || !token)
+  if (!openRouterConfigured())
     return NextResponse.json(
       {
-        error: "Agent is not connected",
-        message: "AI 웹훅 연결 설정을 확인해 주세요.",
+        error: "OpenRouter is not connected",
+        message: "OpenRouter API 키와 모델 설정을 확인해 주세요.",
       },
       { status: 503 },
     );
@@ -84,73 +83,30 @@ export async function POST(request: Request) {
     },
   });
 
-  const task =
-    action === "UPDATE_DAY"
-      ? "update_meal_day"
-      : action === "REVIEW_WEEK"
-        ? "review_week_plan"
-        : action === "REGENERATE_RECIPES"
-          ? "regenerate_week_recipes"
-          : action === "REGENERATE_GROCERY"
-            ? "regenerate_week_grocery"
-            : action === "PUBLISH_MONTH"
-              ? "publish_next_month"
-            : "publish_week_recipes";
-  const payload = {
-    task,
-    // Hermes turns only the prompt field into the agent's message. Keep the
-    // request ID in that visible message as well as the JSON envelope so its
-    // final mealctl command can mark this exact web job as complete.
-    prompt: buildAgentPrompt({
+  try {
+    queueOpenRouterTask({
+      kind: "planner",
       requestId,
-      task,
+      action,
       weekStart,
       date: body.date,
       targetMonth: body.targetMonth,
-      userPrompt: body.prompt,
-    }),
-    date: body.date,
-    weekStart,
-    targetMonth: body.targetMonth,
-    family: body.family ?? [],
-    startDate: body.startDate,
-    days: body.days ?? 7,
-    requestId,
-    requestedAt: new Date().toISOString(),
-  };
-  const serialized = JSON.stringify(payload);
-  const signature = createHmac("sha256", token)
-    .update(serialized)
-    .digest("hex");
-
-  try {
-    const upstream = await fetch(webhookUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Webhook-Signature": signature,
-        "X-Request-ID": requestId,
-      },
-      body: serialized,
-      // Hermes only acknowledges the queued delivery here. Completion is
-      // tracked independently through AgentJob.
-      signal: AbortSignal.timeout(30_000),
+      prompt: body.prompt.trim(),
     });
-    if (!upstream.ok) throw new Error(`Webhook returned ${upstream.status}`);
   } catch (error) {
     await prisma.agentJob.update({
       where: { id: `web-${requestId}` },
       data: {
         status: "FAILED",
-        error: "AI 웹훅에 요청을 전달하지 못했습니다.",
+        error: "OpenRouter 작업을 시작하지 못했습니다.",
         completedAt: new Date(),
       },
     });
-    console.error("Failed to enqueue meal-plan request", error);
+    console.error("Failed to queue OpenRouter meal-plan request", error);
     return NextResponse.json(
       {
-        error: "Agent request failed",
-        message: "AI에 요청을 전달하지 못했습니다. 연결 상태를 확인해 주세요.",
+        error: "OpenRouter request failed",
+        message: "AI 작업을 시작하지 못했습니다. 연결 상태를 확인해 주세요.",
       },
       { status: 502 },
     );
@@ -167,34 +123,6 @@ export async function POST(request: Request) {
     },
     { status: 202 },
   );
-}
-
-function buildAgentPrompt({
-  requestId,
-  task,
-  weekStart,
-  date,
-  targetMonth,
-  userPrompt,
-}: {
-  requestId: string;
-  task: string;
-  weekStart: string;
-  date?: string;
-  targetMonth?: string;
-  userPrompt: string;
-}) {
-  return [
-    "[웹앱 작업 메타데이터 — 최종 mealctl 명령에 반드시 사용]",
-    `requestId: ${requestId}`,
-    `task: ${task}`,
-    `weekStart: ${weekStart}`,
-    ...(date ? [`date: ${date}`] : []),
-    ...(targetMonth ? [`targetMonth: ${targetMonth}`] : []),
-    "",
-    "[사용자 요청]",
-    userPrompt.trim(),
-  ].join("\n");
 }
 
 export async function GET(request: Request) {

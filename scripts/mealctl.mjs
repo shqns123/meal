@@ -26,6 +26,8 @@ if (
     "rebuild-shopping",
     "reply-chat",
     "record-review",
+    "fail-job",
+    "fail-chat",
     "notify-web",
   ].includes(command)
 )
@@ -61,6 +63,8 @@ function usage() {
   node scripts/mealctl.mjs rebuild-shopping --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs reply-chat --id REQUEST_ID --input /path/chat-response.json
   node scripts/mealctl.mjs record-review --week YYYY-MM-DD --summary "reason" [--request-id ID]
+  node scripts/mealctl.mjs fail-job --request-id REQUEST_ID --error "reason"
+  node scripts/mealctl.mjs fail-chat --id REQUEST_ID --error "reason"
   node scripts/mealctl.mjs notify-web --request-id REQUEST_ID
   node scripts/mealctl.mjs notify-web --chat-id REQUEST_ID`);
   process.exit(1);
@@ -141,6 +145,92 @@ function readPayload(inputPath) {
   }
 }
 
+function reusableRecipesForPlans(mealRows) {
+  const required = new Map();
+  const addRequired = (title, category, date) => {
+    const normalizedTitle = String(title ?? "").trim();
+    if (!normalizedTitle) return;
+    const key = `${category}|${normalizedTitle}`;
+    const item = required.get(key) ?? {
+      title: normalizedTitle,
+      category,
+      plannedDates: new Set(),
+    };
+    item.plannedDates.add(date);
+    required.set(key, item);
+  };
+  for (const meal of mealRows) {
+    const date = formatKst(meal.date);
+    if (!meal.dinnerDiningOut) {
+      addRequired(meal.mainDish, "주찬", date);
+      for (const side of parseJsonList(meal.sideDishes))
+        addRequired(side, "반찬", date);
+    }
+    const day = new Date(`${date}T00:00:00Z`).getUTCDay();
+    if (
+      [0, 6].includes(day) &&
+      meal.lunchPlan &&
+      !String(meal.lunchPlan).includes("회사 식사")
+    )
+      addRequired(meal.lunchPlan, "점심", date);
+  }
+
+  const findRecipe = db.prepare(
+    `SELECT * FROM "Recipe" WHERE "title"=? AND "category"=? AND "needsReview"=0
+     AND ("category"='점심' OR ("sourceUrl" IS NOT NULL AND "sourceTitle" IS NOT NULL AND "sourceCheckedAt" IS NOT NULL))
+     ORDER BY "updatedAt" DESC LIMIT 1`,
+  );
+  const findIngredients = db.prepare(
+    `SELECT "name","amount","category" FROM "Ingredient" WHERE "recipeId"=? ORDER BY "id"`,
+  );
+  const reusable = [];
+  for (const requirement of required.values()) {
+    const recipe = findRecipe.get(requirement.title, requirement.category);
+    if (!recipe) continue;
+    const ingredients = findIngredients.all(recipe.id).map((ingredient) => {
+      const match = String(ingredient.amount ?? "").match(
+        /^([0-9]+(?:\.[0-9]+)?)(.+)$/,
+      );
+      return match
+        ? {
+            name: ingredient.name,
+            quantity: Number(match[1]),
+            unit: match[2],
+            category: ingredient.category,
+          }
+        : null;
+    });
+    if (!ingredients.length || ingredients.some((ingredient) => !ingredient))
+      continue;
+    reusable.push({
+      title: recipe.title,
+      description: recipe.description,
+      prepMinutes: recipe.prepMinutes,
+      cookMinutes: recipe.cookMinutes,
+      adultServings: recipe.adultServings,
+      childServings: recipe.childServings,
+      tags: String(recipe.tags ?? "")
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+      category: recipe.category,
+      plannedDates: [...requirement.plannedDates].sort(),
+      ingredients,
+      instructions: parseJsonList(recipe.instructions),
+      babySplitStep: recipe.babySplitStep,
+      storageMethod: recipe.storageMethod,
+      consumeWithin: recipe.consumeWithin,
+      sourceUrl: recipe.sourceUrl,
+      sourceTitle: recipe.sourceTitle,
+      sourceAuthor: recipe.sourceAuthor,
+      sourceCheckedAt: recipe.sourceCheckedAt
+        ? formatKst(recipe.sourceCheckedAt)
+        : null,
+    });
+  }
+  return reusable;
+}
+
 function loadContext(weekStart) {
   const weekEnd = addDays(weekStart, 6);
   const startMs = toMillis(weekStart);
@@ -171,11 +261,6 @@ function loadContext(weekStart) {
       'SELECT "id","title","category","plannedDates","sourceUrl","sourceTitle","sourceAuthor","sourceDomain","sourceCheckedAt","needsReview" FROM "Recipe" WHERE "weekKeys" LIKE ? ORDER BY "plannedDates","title"',
     )
     .all(`%${weekStart}%`);
-  const recipeLibrary = db
-    .prepare(
-      'SELECT "id","title","category","sourceUrl","sourceTitle","sourceAuthor","sourceDomain","sourceCheckedAt" FROM "Recipe" WHERE "needsReview"=0 AND "sourceUrl" IS NOT NULL ORDER BY "title"',
-    )
-    .all();
   return {
     schemaVersion: "meal-week.v1",
     weekStart,
@@ -214,7 +299,7 @@ function loadContext(weekStart) {
         }
       : null,
     existingRecipes,
-    recipeLibrary,
+    reusableRecipes: reusableRecipesForPlans(mealRows),
     outputContract: {
       weekStart: "YYYY-MM-DD (Sunday)",
       changeReason: "string",
@@ -539,9 +624,90 @@ function validateMonth(payload, month) {
   }
   if (changedDates.size !== dates.length)
     errors.push(`mealChanges must contain every day of ${selectedMonth} exactly once.`);
+  const orderedSideChanges = changes
+    .filter(
+      (change) =>
+        dates.includes(change.date) &&
+        Array.isArray(change.sides) &&
+        change.sides.length === 2,
+    )
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const previousMonth = previousMonthKey(selectedMonth);
+  const previousSideRows = db
+    .prepare(
+      'SELECT "sideDishes" FROM "MealPlan" WHERE "monthKey"=? ORDER BY "date"',
+    )
+    .all(previousMonth);
+  const previousSideBatches = [];
+  let previousSignature = "";
+  for (const row of previousSideRows) {
+    const sides = parseJsonList(row.sideDishes).map(normalizeName).sort();
+    if (sides.length !== 2) continue;
+    const signature = sides.join("|");
+    if (signature !== previousSignature) previousSideBatches.push(sides);
+    previousSignature = signature;
+  }
+  const previousSidePairs = new Set(
+    previousSideBatches.map((sides) => sides.join("|")),
+  );
+  const previousSideDishBatches = new Map();
+  for (const sides of previousSideBatches)
+    for (const side of sides)
+      previousSideDishBatches.set(
+        side,
+        (previousSideDishBatches.get(side) ?? 0) + 1,
+      );
+  const usedSidePairs = new Map();
+  const sideDishBatches = new Map();
+  for (let index = 0; index < orderedSideChanges.length; index += 3) {
+    const batch = orderedSideChanges.slice(index, index + 3);
+    const expectedSides = batch[0].sides.map(normalizeName).sort();
+    const expectedSignature = expectedSides.join("|");
+    for (const change of batch.slice(1)) {
+      const signature = change.sides.map(normalizeName).sort().join("|");
+      if (signature !== expectedSignature)
+        errors.push(
+          `Side dishes must stay the same for the 3-day batch ${batch[0].date} through ${batch.at(-1).date}.`,
+        );
+    }
+    if (usedSidePairs.has(expectedSignature))
+      errors.push(
+        `Side dish pair '${expectedSides.join(" + ")}' is reused in separate monthly batches (${usedSidePairs.get(expectedSignature)} and ${batch[0].date}).`,
+      );
+    else usedSidePairs.set(expectedSignature, batch[0].date);
+    if (previousSidePairs.has(expectedSignature))
+      errors.push(
+        `Side dish pair '${expectedSides.join(" + ")}' repeats the previous month.`,
+      );
+    for (const side of expectedSides) {
+      const batchDates = sideDishBatches.get(side) ?? [];
+      batchDates.push(batch[0].date);
+      sideDishBatches.set(side, batchDates);
+      if (batchDates.length > 3)
+        errors.push(
+          `Side dish '${side}' is used in more than three monthly batches (${batchDates.join(", ")}).`,
+        );
+    }
+  }
+  if (previousSideBatches.length) {
+    const currentSides = [...sideDishBatches.keys()];
+    const previousSides = new Set(previousSideDishBatches.keys());
+    const newSideCount = currentSides.filter(
+      (side) => !previousSides.has(side),
+    ).length;
+    const requiredNewSideCount = Math.ceil(currentSides.length * 0.4);
+    if (newSideCount < requiredNewSideCount)
+      errors.push(
+        `At least 40% of unique side dishes must be new compared with ${previousMonth} (${newSideCount}/${currentSides.length}, requires ${requiredNewSideCount}).`,
+      );
+    for (const [side, dates] of sideDishBatches)
+      if ((previousSideDishBatches.get(side) ?? 0) >= 2 && dates.length > 1)
+        errors.push(
+          `Side dish '${side}' appeared in multiple ${previousMonth} batches and may be used in only one ${selectedMonth} batch (${dates.join(", ")}).`,
+        );
+  }
   const existing = db.prepare('SELECT "date" FROM "MealPlan" WHERE "monthKey"=?').all(selectedMonth);
   if (existing.length) errors.push(`${selectedMonth} already has ${existing.length} saved meal plans and will not be overwritten.`);
-  const previousMonth = previousMonthKey(selectedMonth);
   const previousMains = new Set(db.prepare('SELECT "mainDish" FROM "MealPlan" WHERE "monthKey"=?').all(previousMonth).map((row) => row.mainDish ? normalizeName(row.mainDish) : "").filter(Boolean));
   for (const main of mainDishes)
     if (previousMains.has(main)) errors.push(`main dish '${main}' repeats the previous month.`);
@@ -838,7 +1004,7 @@ function beginAgentJob({
   inputPath = null,
   now = Date.now(),
 }) {
-  // Web requests create the RUNNING row before Hermes starts. Reuse that row
+  // Web requests create the RUNNING row before the background worker starts. Reuse that row
   // so the UI can poll one stable requestId. CLI and cron runs still create a
   // fresh row because they do not have a pre-created web job.
   const queued = requestId
@@ -917,7 +1083,7 @@ function publishMonth(payload, month, requestId = null) {
         String(payload.changeReason).trim().slice(0, 2_000),
         2,
         1,
-        false,
+        0,
         now,
         now,
       );
@@ -1330,6 +1496,40 @@ function recordReview(weekStart, summary, requestId = null) {
   printJson({ success: true, jobId, weekStart, maintained: true });
 }
 
+function failJob(requestId, error) {
+  if (!String(requestId ?? "").trim() || String(requestId).length > 120)
+    fail("--request-id is required.");
+  const result = db
+    .prepare(
+      `UPDATE "AgentJob" SET "status"='FAILED',"error"=?,"completedAt"=? WHERE "requestId"=? AND "status"='RUNNING'`,
+    )
+    .run(
+      String(error ?? "AI 작업에 실패했습니다.").trim().slice(0, 2000),
+      Date.now(),
+      requestId,
+    );
+  if (!result.changes)
+    fail("Queued agent job was not found or is already completed.");
+  printJson({ success: true, requestId, status: "FAILED" });
+}
+
+function failChat(id, error) {
+  if (!String(id ?? "").trim() || String(id).length > 120)
+    fail("--id is required.");
+  const result = db
+    .prepare(
+      `UPDATE "AgentChat" SET "status"='FAILED',"error"=?,"completedAt"=? WHERE "id"=? AND "status"='RUNNING'`,
+    )
+    .run(
+      String(error ?? "AI 답변을 완료하지 못했습니다.").trim().slice(0, 2000),
+      Date.now(),
+      id,
+    );
+  if (!result.changes)
+    fail("Queued chat was not found or is already completed.");
+  printJson({ success: true, id, status: "FAILED" });
+}
+
 function notifyWeb({ requestId, chatId }) {
   if (Boolean(requestId) === Boolean(chatId))
     fail("Provide exactly one of --request-id or --chat-id.");
@@ -1426,6 +1626,8 @@ try {
   if (command === "reply-chat") replyChat(readPayload(flags.input), flags.id);
   if (command === "record-review")
     recordReview(requireWeek(flags.week), flags.summary, flags["request-id"]);
+  if (command === "fail-job") failJob(flags["request-id"], flags.error);
+  if (command === "fail-chat") failChat(flags.id, flags.error);
   if (command === "notify-web")
     notifyWeb({ requestId: flags["request-id"], chatId: flags["chat-id"] });
 } finally {

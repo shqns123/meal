@@ -4,7 +4,7 @@ import vm from "node:vm";
 import { DatabaseSync } from "node:sqlite";
 
 const projectRoot = process.cwd();
-const sourcePath = process.argv[2] ?? "Z:\\hermes\\data\\meal_plan_web\\web\\meal-september.js";
+const sourcePath = process.argv[2] ?? path.join(projectRoot, "meal-september.js");
 const dbPath = path.join(projectRoot, "data", "mealplan.db");
 
 if (!fs.existsSync(sourcePath)) throw new Error(`Legacy meal file not found: ${sourcePath}`);

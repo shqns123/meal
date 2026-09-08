@@ -1,6 +1,7 @@
 services:
   app:
     container_name: meal
+    restart: unless-stopped
     build:
       context: .
       network: host
@@ -12,13 +13,16 @@ services:
       APP_LOGIN_PASSWORD: ${APP_LOGIN_PASSWORD:-}
       AUTH_SECRET: ${AUTH_SECRET:-}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
-      AGENT_WEBHOOK_URL: ${AGENT_WEBHOOK_URL:-}
-      AGENT_WEBHOOK_TOKEN: ${AGENT_WEBHOOK_TOKEN:-}
-      AGENT_CHAT_WEBHOOK_URL: ${AGENT_CHAT_WEBHOOK_URL:-}
-      AGENT_CHAT_WEBHOOK_TOKEN: ${AGENT_CHAT_WEBHOOK_TOKEN:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+      OPENROUTER_ENABLE_WEB_SEARCH: ${OPENROUTER_ENABLE_WEB_SEARCH:-true}
+      OPENROUTER_SCHEDULER_ENABLED: ${OPENROUTER_SCHEDULER_ENABLED:-true}
+      OPENROUTER_SITE_URL: ${OPENROUTER_SITE_URL:-}
       NEXT_PUBLIC_VAPID_PUBLIC_KEY: ${NEXT_PUBLIC_VAPID_PUBLIC_KEY:-}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       VAPID_SUBJECT: ${VAPID_SUBJECT:-}
       MEAL_APP_NOTIFY_TOKEN: ${MEAL_APP_NOTIFY_TOKEN:-}
+      # The direct OpenRouter worker runs inside this same container.
+      MEAL_APP_NOTIFY_URL: http://127.0.0.1:3000/api/push/notify
     volumes:
       - ./data:/app/data

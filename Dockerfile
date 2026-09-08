@@ -8,4 +8,4 @@ RUN mkdir -p .next/standalone/.next && cp -r .next/static .next/standalone/.next
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 EXPOSE 3000
-CMD ["sh", "-c", "npx prisma db push && node scripts/migrate-attendance.mjs && node .next/standalone/server.js"]
+CMD ["sh", "-c", "npx prisma db push && node scripts/migrate-attendance.mjs && exec node scripts/start.mjs"]

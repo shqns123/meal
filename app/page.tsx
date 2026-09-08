@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
+  Bot,
   CalendarDays,
   Check,
   ChefHat,
@@ -67,12 +68,14 @@ type AgentRequest = {
   prompt: string;
   action:
     | "PUBLISH_WEEK"
+    | "PUBLISH_MONTH"
     | "UPDATE_DAY"
     | "REVIEW_WEEK"
     | "REGENERATE_RECIPES"
     | "REGENERATE_GROCERY";
   date?: string;
   weekStart?: string;
+  targetMonth?: string;
 };
 type MealSnapshot = {
   date: string;
@@ -231,12 +234,24 @@ export default function Home() {
   }, []);
   const finishAgentChat = useCallback((id: string, message: string) => {
     setPendingChats((current) => current.filter((item) => item.id !== id));
+    setRefreshVersion((version) => version + 1);
     setAppNotice(message);
   }, []);
 
   const openDay = (date: string) => {
     setSelectedWeek(sundayFor(date));
     setSelectedDate(date);
+  };
+  const editDay = (date: string) => {
+    const weekStart = sundayFor(date);
+    setSelectedDate(null);
+    setSelectedWeek(weekStart);
+    setAgentRequest({
+      action: "UPDATE_DAY",
+      date,
+      weekStart,
+      prompt: `${date} 식단만 날짜 상세의 식사 여부와 보유 재료에 맞게 검토해줘. 변경이 필요하면 그 날짜의 주찬·부찬(주말이면 점심 포함) 레시피와 장보기만 검증 후 반영하고, 다른 날짜는 건드리지 마.`,
+    });
   };
   const changeMonth = (amount: number) => {
     const next = shiftMonth(selectedMonth, amount);
@@ -345,20 +360,6 @@ export default function Home() {
               <span className="text-sm font-medium">주간 점검 설정</span>
             )}
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setChatOpen(true);
-              setMobileNavOpen(false);
-            }}
-            title={sidebarCollapsed ? "AI에게 물어보기" : undefined}
-            className={`mb-2 flex h-11 w-full items-center rounded-xl bg-[#0d1247] text-white transition-colors hover:bg-[#171e62] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${sidebarCollapsed ? "justify-center" : "gap-2 px-3"}`}
-          >
-            <MessageCircle size={18} />
-            {!sidebarCollapsed && (
-              <span className="text-sm font-medium">AI에게 물어보기</span>
-            )}
-          </button>
           <div
             className={`flex items-center rounded-xl bg-[#f6f5f4] p-3 ${sidebarCollapsed ? "justify-center" : "gap-2"}`}
           >
@@ -395,17 +396,16 @@ export default function Home() {
               month={selectedMonth}
               weekStart={currentWeek}
               onChangeMonth={changeMonth}
+              onGenerateMonth={() =>
+                setAgentRequest({
+                  action: "PUBLISH_MONTH",
+                  targetMonth: selectedMonth,
+                  prompt: `${formatMonth(selectedMonth)}의 월간 식단을 생성하고 검증 후 저장해줘. 레시피와 장보기는 생성하지 마.`,
+                })
+              }
               meals={mealItems}
               onOpenDay={openDay}
-              onEditDay={(date) => {
-                setSelectedWeek(sundayFor(date));
-                setAgentRequest({
-                  action: "UPDATE_DAY",
-                  date,
-                  weekStart: sundayFor(date),
-                  prompt: `${date} 식단만 날짜 상세의 식사 여부와 보유 재료에 맞게 검토해줘. 변경이 필요하면 그 날짜의 주찬·부찬(주말이면 점심 포함) 레시피와 장보기만 검증 후 반영하고, 다른 날짜는 건드리지 마.`,
-                });
-              }}
+              onEditDay={editDay}
             />
           )}
           {active === "레시피" && (
@@ -450,10 +450,21 @@ export default function Home() {
           )}
         </div>
       </section>
+      <button
+        type="button"
+        onClick={() => setChatOpen(true)}
+        className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-[max(1rem,env(safe-area-inset-right))] z-20 grid h-14 w-14 place-items-center rounded-full bg-[#0d1247] text-white shadow-[0_10px_28px_rgba(13,18,71,.24)] transition-[transform,background-color,box-shadow] duration-200 ease-out hover:-translate-y-0.5 hover:bg-[#171e62] hover:shadow-[0_14px_32px_rgba(13,18,71,.28)] active:translate-y-0 active:scale-95 focus:outline-none focus:ring-2 focus:ring-[#0075de]/45 focus:ring-offset-2 focus:ring-offset-[#f6f5f4]"
+        aria-label="AI 채팅 열기"
+        aria-expanded={chatOpen}
+        title="AI 채팅"
+      >
+        <Bot size={25} strokeWidth={1.9} aria-hidden="true" />
+      </button>
       {selectedDate && (
         <DayDetailModal
           date={selectedDate}
           close={() => setSelectedDate(null)}
+          onEdit={() => editDay(selectedDate)}
         />
       )}
       {agentRequest && (
@@ -464,7 +475,13 @@ export default function Home() {
           onQueued={queueAgentJob}
         />
       )}
-      {chatOpen && <ChatModal close={() => setChatOpen(false)} onQueued={queueAgentChat} />}
+      {chatOpen && (
+        <ChatModal
+          close={() => setChatOpen(false)}
+          onQueued={queueAgentChat}
+          targetMonth={selectedMonth}
+        />
+      )}
       <AgentCompletionMonitor jobs={pendingJobs} onFinished={finishAgentJob} />
       <AgentChatCompletionMonitor chats={pendingChats} onFinished={finishAgentChat} />
       <NotificationPermissionPrompt />
@@ -564,7 +581,7 @@ function NotificationPermissionPrompt() {
 }
 
 function InAppNotice({ message, close }: { message: string; close: () => void }) {
-  return <div role="status" className="fixed bottom-5 right-5 z-[60] flex max-w-[calc(100vw-2.5rem)] items-start gap-3 rounded-xl border border-black/[.08] bg-white px-4 py-3 text-sm text-black/75 shadow-[0_8px_24px_rgba(0,0,0,.12)]"><Sparkles className="mt-0.5 shrink-0 text-[#0075de]" size={17} /><p>{message}</p><button type="button" onClick={close} className="-mr-1 -mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-black/45 hover:bg-black/[.05]" aria-label="알림 닫기"><X size={16} /></button></div>;
+  return <div role="status" className="fixed bottom-24 right-4 z-[60] flex max-w-[calc(100vw-2rem)] items-start gap-3 rounded-xl border border-black/[.08] bg-white px-4 py-3 text-sm text-black/75 shadow-[0_8px_24px_rgba(0,0,0,.12)] sm:right-5"><Sparkles className="mt-0.5 shrink-0 text-[#0075de]" size={17} /><p>{message}</p><button type="button" onClick={close} className="-mr-1 -mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-black/45 hover:bg-black/[.05]" aria-label="알림 닫기"><X size={16} /></button></div>;
 }
 
 function urlBase64ToUint8Array(value: string) {
@@ -646,6 +663,7 @@ function MealPlanner({
   month,
   weekStart,
   onChangeMonth,
+  onGenerateMonth,
   meals,
   onOpenDay,
   onEditDay,
@@ -655,6 +673,7 @@ function MealPlanner({
   month: string;
   weekStart: string;
   onChangeMonth: (amount: number) => void;
+  onGenerateMonth: () => void;
   meals: Meal[];
   onOpenDay: (date: string) => void;
   onEditDay: (date: string) => void;
@@ -662,6 +681,10 @@ function MealPlanner({
   const weekDays = buildWeekDays(weekStart);
   const periodLabel =
     view === "month" ? formatMonth(month) : formatWeekRangeLong(weekStart);
+  const monthHasMeals = meals.some((meal) => meal.date.startsWith(`${month}-`));
+  const generateMonthLabel = monthHasMeals
+    ? `${formatMonth(month)} 식단이 이미 있습니다`
+    : `${formatMonth(month)} 월간 식단 생성 테스트`;
   return (
     <>
       <PageTitle
@@ -692,7 +715,7 @@ function MealPlanner({
         </div>
       </PageTitle>
       <Card className="overflow-hidden">
-        <div className="flex items-center border-b border-black/[.08] px-4 py-3 sm:px-5">
+        <div className="flex items-center justify-between gap-2 border-b border-black/[.08] px-4 py-3 sm:px-5">
           <div className="flex items-center gap-2">
             {view === "month" && (
               <button
@@ -718,6 +741,20 @@ function MealPlanner({
               </button>
             )}
           </div>
+          {view === "month" && (
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={monthHasMeals}
+              onClick={onGenerateMonth}
+              className="h-11 w-11 shrink-0 px-0 sm:w-auto sm:px-3"
+              aria-label={generateMonthLabel}
+              title={generateMonthLabel}
+            >
+              <Sparkles size={16} />
+              <span className="hidden sm:inline">월간 생성 테스트</span>
+            </Button>
+          )}
         </div>
         {view === "month" ? (
           <>
@@ -812,7 +849,6 @@ function MonthView({
           <div
             className={`calendar-cell ${cell.current ? "" : "bg-black/[.015] text-black/30"}`}
             key={`${cell.date}-${index}`}
-            onDoubleClick={() => cell.current && onOpenDay(cell.date)}
           >
             <button
               type="button"
@@ -846,17 +882,20 @@ function MobileMealList({
       {days.map((cell) => {
         const meal = meals.find((item) => item.date === cell.date);
         return (
-          <button
-            type="button"
+          <div
             key={cell.date}
-            onClick={() => onOpenDay(cell.date)}
-            className={`flex w-full items-start gap-3 rounded-xl p-4 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${meal ? `${meal.color} hover:brightness-[.98]` : "bg-[#f6f5f4] text-black/50"}`}
-            aria-label={`${cell.date} 식단 상세 보기`}
+            className={`flex w-full items-start gap-3 rounded-xl p-4 text-left ${meal ? meal.color : "bg-[#f6f5f4] text-black/50"}`}
           >
-            <span className="min-w-10 pt-0.5 text-sm font-medium text-black/60">
-              {weekdayFor(cell.date)}
-              <br />
-              {cell.day}일
+            <span className="flex min-w-11 flex-col items-center text-sm font-medium text-black/60">
+              <span>{weekdayFor(cell.date)}</span>
+              <button
+                type="button"
+                onClick={() => onOpenDay(cell.date)}
+                className="mt-1 grid h-11 w-11 place-items-center rounded-lg text-base font-semibold text-black/75 transition-colors hover:bg-white/55 focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+                aria-label={`${cell.date} 식단 상세 보기`}
+              >
+                {cell.day}
+              </button>
             </span>
             {meal ? (
               <span className="min-w-0 flex-1">
@@ -870,7 +909,7 @@ function MobileMealList({
             ) : (
               <span className="pt-0.5 text-sm">식단 없음</span>
             )}
-          </button>
+          </div>
         );
       })}
     </div>
@@ -895,20 +934,17 @@ function WeekView({
           <div
             key={cell.date}
             className="min-h-[420px] border-r border-black/[.08] p-3 last:border-0"
-            onDoubleClick={() => onOpenDay(cell.date)}
           >
+            <span className="block text-center text-xs text-black/55">
+              {weekdayFor(cell.date)}
+            </span>
             <button
               type="button"
               onClick={() => onOpenDay(cell.date)}
-              className="mx-auto block rounded-lg p-1 text-center focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+              className="mx-auto mt-1 grid h-7 w-7 place-items-center rounded-full text-sm transition-colors hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
               aria-label={`${cell.date} 식단 상세 보기`}
             >
-              <span className="block text-xs text-black/55">
-                {weekdayFor(cell.date)}
-              </span>
-              <span className="mt-1 grid h-7 w-7 place-items-center rounded-full text-sm">
-                {cell.day}
-              </span>
+              {cell.day}
             </button>
             {meal && (
               <MealCard meal={meal} onEdit={() => onEditDay(cell.date)} />
@@ -1643,7 +1679,15 @@ function WeeklyReviewSettings({
     </>
   );
 }
-function DayDetailModal({ date, close }: { date: string; close: () => void }) {
+function DayDetailModal({
+  date,
+  close,
+  onEdit,
+}: {
+  date: string;
+  close: () => void;
+  onEdit: () => void;
+}) {
   const [detail, setDetail] = useState<DayDetail | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -1783,6 +1827,14 @@ function DayDetailModal({ date, close }: { date: string; close: () => void }) {
                 </p>
               )}
             </section>
+            <Button
+              variant="outline"
+              onClick={onEdit}
+              className="mt-3 h-11 w-full gap-2"
+            >
+              <Pencil size={16} aria-hidden="true" />
+              일일 식단 수정
+            </Button>
             <section className="mt-4 rounded-xl border border-black/[.08]">
               <div className="border-b border-black/[.08] p-4">
                 <h3 className="font-semibold">집에서 먹지 않는 끼니</h3>
@@ -1884,12 +1936,12 @@ function ScheduleCheck({
     </label>
   );
 }
-function ChatModal({ close, onQueued }: { close: () => void; onQueued: (chat: PendingAgentChat) => void }) {
+function ChatModal({ close, onQueued, targetMonth }: { close: () => void; onQueued: (chat: PendingAgentChat) => void; targetMonth: string }) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: "assistant",
       content:
-        "오늘 식단, 레시피, 장보기처럼 우리집 식탁에 관한 것을 물어보세요. 필요하면 웹에서 확인한 정보도 함께 알려드릴게요.",
+        "식단에 관해 물어보거나 변경을 요청해 보세요. 날짜와 원하는 내용을 함께 적으면 레시피와 장보기까지 확인해 반영할게요.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -1914,6 +1966,7 @@ function ChatModal({ close, onQueued }: { close: () => void; onQueued: (chat: Pe
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: content,
+          targetMonth,
           conversation: messages.slice(-8),
         }),
       });
@@ -1923,7 +1976,7 @@ function ChatModal({ close, onQueued }: { close: () => void; onQueued: (chat: Pe
           data.message ?? data.error ?? "AI가 답변을 처리하지 못했습니다.",
         );
       onQueued({ id: data.id });
-      const deadline = Date.now() + 95_000;
+      const deadline = Date.now() + 10 * 60_000;
       let result: {
         status?: string;
         answer?: string;
@@ -1987,7 +2040,7 @@ function ChatModal({ close, onQueued }: { close: () => void; onQueued: (chat: Pe
       <div className="flex items-start justify-between border-b border-black/[.08] px-5 py-4">
         <div>
           <div className="flex items-center gap-2 text-sm text-[#0075de]">
-            <MessageCircle size={16} />
+            <Bot size={16} />
             <span className="font-medium">AI 채팅</span>
           </div>
           <h2
@@ -2069,7 +2122,7 @@ function ChatModal({ close, onQueued }: { close: () => void; onQueued: (chat: Pe
             }}
             disabled={loading}
             className="max-h-28 min-h-11 flex-1 resize-none bg-transparent px-2 py-2 text-base outline-none placeholder:text-black/45 sm:text-sm"
-            placeholder="예: 오늘 저녁 칼로리는 몇이야?"
+            placeholder="예: 7일부터 9일까지 부찬을 바꿔줘"
             aria-label="AI에게 질문하기"
           />
           <button
@@ -2082,7 +2135,7 @@ function ChatModal({ close, onQueued }: { close: () => void; onQueued: (chat: Pe
           </button>
         </div>
         <p className="px-1 pt-2 text-[11px] text-black/55">
-          채팅은 읽기 전용입니다. 식단 변경은 날짜별 수정 기능을 이용해 주세요.
+          선택된 {Number(targetMonth.slice(5))}월 식단을 기준으로 답하고 변경합니다.
         </p>
       </form>
     </Dialog>
@@ -2107,8 +2160,11 @@ function AgentModal({
   const [beforeSnapshot, setBeforeSnapshot] = useState<MealSnapshot | null>(
     null,
   );
+  const isMonthRequest = request.action === "PUBLISH_MONTH";
   const description =
-    request.action === "UPDATE_DAY"
+    isMonthRequest
+      ? `${formatMonth(request.targetMonth!)} 식단만 생성합니다. 레시피와 장보기는 생성하지 않습니다.`
+      : request.action === "UPDATE_DAY"
       ? `${request.date} 식단과 그 날짜의 레시피·장보기만 수정합니다.`
       : request.action === "REGENERATE_RECIPES"
         ? "선택한 주차의 메뉴는 유지하고 레시피만 새로 만듭니다."
@@ -2129,6 +2185,7 @@ function AgentModal({
           action: request.action,
           date: request.date,
           weekStart: request.weekStart ?? sundayFor(request.date),
+          targetMonth: request.targetMonth,
           days: request.action === "UPDATE_DAY" ? 1 : 7,
         }),
       });
@@ -2228,7 +2285,7 @@ function AgentModal({
           id="agent-dialog-title"
           className="mt-5 text-2xl font-semibold tracking-tight"
         >
-          AI에게 식단 검토 요청
+          {isMonthRequest ? "월간 식단 생성 테스트" : "AI에게 식단 검토 요청"}
         </h2>
         <p className="mt-2 text-sm leading-5 text-black/60">{description}</p>
         <label
@@ -2258,7 +2315,9 @@ function AgentModal({
             ? "요청을 전달하고 있어요..."
             : requestId
               ? "백그라운드에서 처리 중"
-              : "검토 요청하기"}
+              : isMonthRequest
+                ? "월간 식단 생성하기"
+                : "검토 요청하기"}
         </Button>
         {message && (
           <div

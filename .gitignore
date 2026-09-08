@@ -6,3 +6,5 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 data/backups/
+data/agent-inputs/
+data/agent-requests/
