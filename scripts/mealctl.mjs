@@ -608,7 +608,7 @@ function validateDay(payload, weekStart, date) {
   return validatePayload(payload, weekStart, date);
 }
 
-function validateMonth(payload, month) {
+function validateMonth(payload, month, allowExisting = false) {
   const selectedMonth = requireMonth(month);
   const dates = monthDates(selectedMonth);
   const errors = [];
@@ -724,7 +724,8 @@ function validateMonth(payload, month) {
         );
   }
   const existing = db.prepare('SELECT "date" FROM "MealPlan" WHERE "monthKey"=?').all(selectedMonth);
-  if (existing.length) errors.push(`${selectedMonth} already has ${existing.length} saved meal plans and will not be overwritten.`);
+  if (existing.length && !allowExisting)
+    errors.push(`${selectedMonth} already has ${existing.length} saved meal plans and will not be overwritten.`);
   const previousMains = new Set(db.prepare('SELECT "mainDish" FROM "MealPlan" WHERE "monthKey"=?').all(previousMonth).map((row) => row.mainDish ? normalizeName(row.mainDish) : "").filter(Boolean));
   for (const main of mainDishes)
     if (previousMains.has(main)) errors.push(`main dish '${main}' repeats the previous month.`);
@@ -1063,7 +1064,7 @@ function failQueuedAgentJob(requestId, error) {
 function publishMonth(payload, month, requestId = null) {
   const selectedMonth = requireMonth(month);
   const replaceExisting = flags.replace === "true";
-  const validation = validateMonth(payload, selectedMonth);
+  const validation = validateMonth(payload, selectedMonth, replaceExisting);
   if (!validation.valid) {
     failQueuedAgentJob(requestId, validation.errors.join("; "));
     printJson(validation);
@@ -1853,7 +1854,11 @@ try {
   }
   if (command === "validate-month") {
     const payload = readPayload(flags.input);
-    const result = validateMonth(payload, requireMonth(flags.month ?? payload.month));
+    const result = validateMonth(
+      payload,
+      requireMonth(flags.month ?? payload.month),
+      flags.replace === "true",
+    );
     printJson(result);
     if (!result.valid) process.exitCode = 2;
   }

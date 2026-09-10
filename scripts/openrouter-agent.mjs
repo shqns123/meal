@@ -316,12 +316,18 @@ async function runChatMonthAction(ruleFiles, decision) {
   );
   const scope = `${month}의 모든 날짜를 한 번씩 포함하는 월간 식단이며 레시피와 장보기는 만들지 않는다.`;
   let payload = modelJson(result.content);
+  payload.schemaVersion = "meal-month.v1";
+  payload.month = month;
   payload = await completePayload(
     payload,
     current,
     ruleFiles,
     scope,
-    (candidate) => validate("validate-month", candidate, ["--month", month]),
+    (candidate) => validate(
+      "validate-month",
+      candidate,
+      ["--month", month, ...(replacing ? ["--replace", "true"] : [])],
+    ),
     false,
   );
   publish(
@@ -674,6 +680,8 @@ async function runPlanner() {
       "\n" + task.targetMonth + "의 모든 날짜를 포함한 meal-month.v1 JSON만 반환한다. 레시피·장보기는 만들지 않는다.");
     const scope = task.targetMonth + "의 모든 날짜를 한 번씩 포함하는 월간 식단이며 레시피와 장보기는 만들지 않는다.";
     let payload = modelJson(result.content);
+    payload.schemaVersion = "meal-month.v1";
+    payload.month = task.targetMonth;
     payload = await completePayload(
       payload,
       current,
