@@ -168,7 +168,7 @@ function citations(annotations) {
 function requestsMealDataChange(message) {
   const text = String(message || "").replace(/\s+/g, " ");
   const mentionsMealData =
-    /(식단|메뉴|주찬|부찬|반찬|점심|저녁|레시피|장보기|외식|미식사|식사\s*여부|집에서\s*(?:먹|식사))/.test(text);
+    /(월간|주간|식단|메뉴|주찬|부찬|반찬|점심|저녁|레시피|장보기|외식|미식사|식사\s*여부|집에서\s*(?:먹|식사))/.test(text);
   const asksToChange =
     /(바꿔|바꾸어|바꿔\s*달|변경\s*해|수정\s*해|교체\s*해|삭제|지워|추가|등록|재생성|재설정|초기화|새로\s*(?:짜|만들)|짜\s*줘|만들어\s*줘|반영\s*해|저장\s*해|구매\s*(?:완료|취소)|미식사|외식)/.test(text);
   return mentionsMealData && asksToChange;
@@ -230,6 +230,46 @@ function selectedMutationMonth(message, fallbackMonth) {
   if (monthOnly && /^\d{4}-\d{2}$/.test(fallbackMonth || ""))
     return `${fallbackMonth.slice(0, 4)}-${String(Number(monthOnly[1])).padStart(2, "0")}`;
   return fallbackMonth;
+}
+function selectedResetStartDate(message, month) {
+  const text = String(message || "");
+  if (!/(?:부터|이후)/.test(text)) return null;
+  const full = text.match(
+    /(20\d{2})\s*[년./-]\s*(1[0-2]|0?[1-9])\s*[월./-]\s*(3[01]|[12]?\d)\s*일?\s*(?:부터|이후)/,
+  );
+  const candidate = full
+    ? `${full[1]}-${String(Number(full[2])).padStart(2, "0")}-${String(Number(full[3])).padStart(2, "0")}`
+    : (() => {
+        const day = text.match(/(3[01]|[12]?\d)\s*일\s*(?:부터|이후)/);
+        return day
+          ? `${month}-${String(Number(day[1])).padStart(2, "0")}`
+          : null;
+      })();
+  return candidate && validDate(candidate) && candidate.startsWith(`${month}-`)
+    ? candidate
+    : null;
+}
+function preserveMonthBefore(payload, current, fromDate) {
+  if (!fromDate) return payload;
+  const preserved = (current.existingMonthMeals || [])
+    .filter((meal) => meal.date < fromDate)
+    .map((meal) => ({
+      date: meal.date,
+      lunch: meal.lunchPlan,
+      main: meal.mainDish,
+      sides: meal.sides,
+      baby: meal.babyMenu || undefined,
+      note: meal.cookingNote || undefined,
+    }));
+  const replacements = Array.isArray(payload?.mealChanges)
+    ? payload.mealChanges.filter((meal) => String(meal?.date || "") >= fromDate)
+    : [];
+  return {
+    ...payload,
+    mealChanges: [...preserved, ...replacements].sort((a, b) =>
+      String(a.date).localeCompare(String(b.date)),
+    ),
+  };
 }
 function sundayForDate(date) {
   const value = new Date(`${date}T00:00:00Z`);
@@ -320,6 +360,9 @@ async function runChatMonthAction(ruleFiles, decision) {
     return { answer: "생성하거나 재설정할 연도와 월을 알려주세요.", sources: [] };
   const current = monthContext(month);
   const replacing = decision.intent === "RESET_MONTH";
+  const replaceFrom = replacing
+    ? selectedResetStartDate(task.message, month)
+    : null;
   if (current.existingMonthMeals?.length && !replacing)
     return {
       answer: `${month} 월간 식단이 이미 있습니다. 기존 내용을 교체하려면 ‘${month} 월간 식단을 재설정해줘’라고 요청해 주세요.`,
@@ -329,11 +372,18 @@ async function runChatMonthAction(ruleFiles, decision) {
     systemPrompt(ruleFiles),
     `[월간 컨텍스트]\n${JSON.stringify(current)}\n[사용자 요청]\n${task.message}\n` +
       `${month}의 모든 날짜를 한 번씩 포함한 meal-month.v1 JSON만 반환한다. ` +
+      (replaceFrom
+        ? `${replaceFrom} 이전 식단은 existingMonthMeals와 완전히 동일하게 유지하고, ${replaceFrom}부터 월말까지만 새로 구성한다. `
+        : "") +
       "레시피와 장보기는 만들지 않는다. 기존 월을 재설정하더라도 날짜 상세의 가족 일정은 유지한다.",
     false,
   );
-  const scope = `${month}의 모든 날짜를 한 번씩 포함하는 월간 식단이며 레시피와 장보기는 만들지 않는다.`;
-  let payload = normalizeMonthPayload(modelJson(result.content), month);
+  const scope = `${month}의 모든 날짜를 한 번씩 포함하며 ${replaceFrom ? `${replaceFrom} 이전은 유지하고 그날부터 월말까지만 교체하는` : "월 전체를 교체하는"} 월간 식단이다. 레시피와 장보기는 만들지 않는다.`;
+  let payload = preserveMonthBefore(
+    normalizeMonthPayload(modelJson(result.content), month),
+    current,
+    replaceFrom,
+  );
   payload = await completePayload(
     payload,
     current,
@@ -341,20 +391,33 @@ async function runChatMonthAction(ruleFiles, decision) {
     scope,
     (candidate) => validate(
       "validate-month",
-      normalizeMonthPayload(candidate, month),
+      preserveMonthBefore(
+        normalizeMonthPayload(candidate, month),
+        current,
+        replaceFrom,
+      ),
       ["--month", month, ...(replacing ? ["--replace", "true"] : [])],
     ),
     false,
   );
-  payload = normalizeMonthPayload(payload, month);
+  payload = preserveMonthBefore(
+    normalizeMonthPayload(payload, month),
+    current,
+    replaceFrom,
+  );
   publish(
     "publish-month",
     writeInput(`chat-month-${month}`, payload),
-    ["--month", month, ...(replacing ? ["--replace", "true"] : [])],
+    [
+      "--month",
+      month,
+      ...(replacing ? ["--replace", "true"] : []),
+      ...(replaceFrom ? ["--replace-from", replaceFrom] : []),
+    ],
   );
   return {
     answer: replacing
-      ? `${month} 월간 식단을 새 구성으로 재설정했습니다. 기존 레시피와 자동 장보기 항목은 정리했으며 날짜별 가족 일정은 유지했습니다.`
+      ? `${replaceFrom ?? month}부터 월말까지 식단을 새 구성으로 재설정했습니다. 변경 범위의 기존 레시피와 자동 장보기 항목은 정리했으며 이전 식단과 날짜별 가족 일정은 유지했습니다.`
       : `${month} 월간 식단을 생성했습니다.`,
     sources: [],
   };

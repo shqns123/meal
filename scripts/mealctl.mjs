@@ -57,9 +57,9 @@ function usage() {
   node scripts/mealctl.mjs context --week YYYY-MM-DD
   node scripts/mealctl.mjs context-month --month YYYY-MM
   node scripts/mealctl.mjs validate-week --input /path/week.json [--week YYYY-MM-DD]
-  node scripts/mealctl.mjs validate-month --input /path/month.json --month YYYY-MM
+  node scripts/mealctl.mjs validate-month --input /path/month.json --month YYYY-MM [--replace true]
   node scripts/mealctl.mjs publish-week --input /path/week.json --week YYYY-MM-DD [--request-id ID]
-  node scripts/mealctl.mjs publish-month --input /path/month.json --month YYYY-MM [--request-id ID]
+  node scripts/mealctl.mjs publish-month --input /path/month.json --month YYYY-MM [--replace true] [--replace-from YYYY-MM-DD] [--request-id ID]
   node scripts/mealctl.mjs publish-recipes --input /path/week.json --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs validate-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD
   node scripts/mealctl.mjs publish-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD [--request-id ID]
@@ -1064,6 +1064,13 @@ function failQueuedAgentJob(requestId, error) {
 function publishMonth(payload, month, requestId = null) {
   const selectedMonth = requireMonth(month);
   const replaceExisting = flags.replace === "true";
+  const replaceFrom = flags["replace-from"] || null;
+  if (
+    replaceFrom &&
+    (!replaceExisting ||
+      !monthDates(selectedMonth).includes(replaceFrom))
+  )
+    throw new Error("--replace-from must be a date inside --month and requires --replace true.");
   const validation = validateMonth(payload, selectedMonth, replaceExisting);
   if (!validation.valid) {
     failQueuedAgentJob(requestId, validation.errors.join("; "));
@@ -1091,13 +1098,17 @@ function publishMonth(payload, month, requestId = null) {
       .get(selectedMonth).count;
     if (existingCount && !replaceExisting)
       throw new Error(`${selectedMonth} 월간 식단이 이미 있어 덮어쓰지 않았습니다.`);
+    const affectedDates = monthDates(selectedMonth).filter(
+      (date) => !replaceFrom || date >= replaceFrom,
+    );
+    const affectedDateSet = new Set(affectedDates);
     if (replaceExisting) {
-      const affectedWeeks = new Set(monthDates(selectedMonth).map(sundayFor));
+      const affectedWeeks = new Set(affectedDates.map(sundayFor));
       const affectedRecipes = db
         .prepare('SELECT "id","plannedDates" FROM "Recipe" WHERE "plannedDates" LIKE ?')
         .all(`%${selectedMonth}-%`);
       const unlinkRecipe = db.prepare(
-        'UPDATE "MealPlan" SET "recipeId"=NULL,"updatedAt"=? WHERE "recipeId"=? AND "monthKey"=?',
+        'UPDATE "MealPlan" SET "recipeId"=NULL,"updatedAt"=? WHERE "recipeId"=? AND "date">=? AND "date"<?',
       );
       const trimRecipe = db.prepare(
         'UPDATE "Recipe" SET "plannedDates"=?,"weekKeys"=?,"updatedAt"=? WHERE "id"=?',
@@ -1105,9 +1116,14 @@ function publishMonth(payload, month, requestId = null) {
       const deleteRecipe = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
       for (const recipe of affectedRecipes) {
         const remainingDates = parseJsonList(recipe.plannedDates).filter(
-          (date) => !String(date).startsWith(`${selectedMonth}-`),
+          (date) => !affectedDateSet.has(String(date)),
         );
-        unlinkRecipe.run(now, recipe.id, selectedMonth);
+        unlinkRecipe.run(
+          now,
+          recipe.id,
+          toMillis(affectedDates[0]),
+          toMillis(addDays(affectedDates.at(-1), 1)),
+        );
         if (!remainingDates.length) deleteRecipe.run(recipe.id);
         else
           trimRecipe.run(
@@ -1117,7 +1133,9 @@ function publishMonth(payload, month, requestId = null) {
             recipe.id,
           );
       }
-      db.prepare('DELETE FROM "MealPlan" WHERE "monthKey"=?').run(selectedMonth);
+      db.prepare(
+        'DELETE FROM "MealPlan" WHERE "monthKey"=? AND "date">=?',
+      ).run(selectedMonth, toMillis(affectedDates[0]));
       const findShoppingWeek = db.prepare(
         'SELECT "id" FROM "ShoppingWeek" WHERE "startDate"=?',
       );
@@ -1131,7 +1149,10 @@ function publishMonth(payload, month, requestId = null) {
       }
     }
     const insertPlan = db.prepare('INSERT INTO "MealPlan" ("id","date","monthKey","mealType","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote","changeReason","adultServings","childServings","dinnerDiningOut","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
-    for (const change of payload.mealChanges) {
+    const changesToPublish = payload.mealChanges.filter((change) =>
+      affectedDateSet.has(String(change.date)),
+    );
+    for (const change of changesToPublish) {
       const date = String(change.date);
       insertPlan.run(
         `month-${date}-${crypto.randomBytes(3).toString("hex")}`,
@@ -1151,10 +1172,10 @@ function publishMonth(payload, month, requestId = null) {
         now,
       );
     }
-    const summary = JSON.stringify({ mealChanges: payload.mealChanges.length, recipes: 0, shoppingItems: 0, backup: backupPath, month: selectedMonth, replaced: Boolean(existingCount) });
+    const summary = JSON.stringify({ mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, month: selectedMonth, replaced: Boolean(existingCount), replaceFrom });
     db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?').run("COMPLETED", summary, Date.now(), jobId);
     db.exec("COMMIT");
-    printJson({ success: true, jobId, month: selectedMonth, mealChanges: payload.mealChanges.length, recipes: 0, shoppingItems: 0, backup: backupPath, replaced: Boolean(existingCount) });
+    printJson({ success: true, jobId, month: selectedMonth, mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, replaced: Boolean(existingCount), replaceFrom });
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}
     db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", String(error.message ?? error), Date.now(), jobId);
