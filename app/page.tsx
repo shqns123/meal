@@ -148,6 +148,7 @@ export default function Home() {
   const [selectedWeek, setSelectedWeek] = useState(() =>
     sundayFor(currentKstDate()),
   );
+  const [todayScrollRequest, setTodayScrollRequest] = useState(0);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [pendingJobs, setPendingJobs] = useState<PendingAgentJob[]>([]);
   const [pendingChats, setPendingChats] = useState<PendingAgentChat[]>([]);
@@ -241,6 +242,13 @@ export default function Home() {
   const openDay = (date: string) => {
     setSelectedWeek(sundayFor(date));
     setSelectedDate(date);
+  };
+  const goToToday = () => {
+    const today = currentKstDate();
+    setView("month");
+    setSelectedMonth(today.slice(0, 7));
+    setSelectedWeek(sundayFor(today));
+    setTodayScrollRequest((request) => request + 1);
   };
   const editDay = (date: string) => {
     const weekStart = sundayFor(date);
@@ -396,6 +404,8 @@ export default function Home() {
               month={selectedMonth}
               weekStart={currentWeek}
               onChangeMonth={changeMonth}
+              onGoToday={goToToday}
+              todayScrollRequest={todayScrollRequest}
               onGenerateMonth={() =>
                 setAgentRequest({
                   action: "PUBLISH_MONTH",
@@ -663,6 +673,8 @@ function MealPlanner({
   month,
   weekStart,
   onChangeMonth,
+  onGoToday,
+  todayScrollRequest,
   onGenerateMonth,
   meals,
   onOpenDay,
@@ -673,6 +685,8 @@ function MealPlanner({
   month: string;
   weekStart: string;
   onChangeMonth: (amount: number) => void;
+  onGoToday: () => void;
+  todayScrollRequest: number;
   onGenerateMonth: () => void;
   meals: Meal[];
   onOpenDay: (date: string) => void;
@@ -715,7 +729,7 @@ function MealPlanner({
         </div>
       </PageTitle>
       <Card className="overflow-hidden">
-        <div className="flex items-center justify-between gap-2 border-b border-black/[.08] px-4 py-3 sm:px-5">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[.08] px-4 py-3 sm:px-5">
           <div className="flex items-center gap-2">
             {view === "month" && (
               <button
@@ -742,18 +756,28 @@ function MealPlanner({
             )}
           </div>
           {view === "month" && (
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={monthHasMeals}
-              onClick={onGenerateMonth}
-              className="h-11 w-11 shrink-0 px-0 sm:w-auto sm:px-3"
-              aria-label={generateMonthLabel}
-              title={generateMonthLabel}
-            >
-              <Sparkles size={16} />
-              <span className="hidden sm:inline">월간 생성 테스트</span>
-            </Button>
+            <div className="ml-auto flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onGoToday}
+                className="h-11 px-3 lg:hidden"
+              >
+                오늘
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={monthHasMeals}
+                onClick={onGenerateMonth}
+                className="h-11 w-11 shrink-0 px-0 sm:w-auto sm:px-3"
+                aria-label={generateMonthLabel}
+                title={generateMonthLabel}
+              >
+                <Sparkles size={16} />
+                <span className="hidden sm:inline">월간 생성 테스트</span>
+              </Button>
+            </div>
           )}
         </div>
         {view === "month" ? (
@@ -763,6 +787,9 @@ function MealPlanner({
                 days={buildMonthDays(month).filter((cell) => cell.current)}
                 meals={meals}
                 onOpenDay={onOpenDay}
+                today={currentKstDate()}
+                todayScrollRequest={todayScrollRequest}
+                autoScrollToToday
               />
             </div>
             <div className="hidden lg:block">
@@ -872,11 +899,37 @@ function MobileMealList({
   days,
   meals,
   onOpenDay,
+  today,
+  todayScrollRequest = 0,
+  autoScrollToToday = false,
 }: {
   days: ReturnType<typeof buildMonthDays>;
   meals: Meal[];
   onOpenDay: (date: string) => void;
+  today?: string;
+  todayScrollRequest?: number;
+  autoScrollToToday?: boolean;
 }) {
+  const todayRef = useRef<HTMLDivElement>(null);
+  const didAutoScroll = useRef(false);
+  useEffect(() => {
+    if (
+      !autoScrollToToday ||
+      !today ||
+      !todayRef.current ||
+      !window.matchMedia("(max-width: 1023px)").matches
+    )
+      return;
+    if (didAutoScroll.current && todayScrollRequest === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      todayRef.current?.scrollIntoView({
+        behavior: todayScrollRequest > 0 ? "smooth" : "auto",
+        block: "center",
+      });
+      didAutoScroll.current = true;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [autoScrollToToday, today, todayScrollRequest]);
   return (
     <div className="space-y-2 p-3">
       {days.map((cell) => {
@@ -884,6 +937,7 @@ function MobileMealList({
         return (
           <div
             key={cell.date}
+            ref={cell.date === today ? todayRef : undefined}
             className={`flex w-full items-start gap-3 rounded-xl p-4 text-left ${meal ? meal.color : "bg-[#f6f5f4] text-black/50"}`}
           >
             <span className="flex min-w-11 flex-col items-center text-sm font-medium text-black/60">
@@ -891,8 +945,9 @@ function MobileMealList({
               <button
                 type="button"
                 onClick={() => onOpenDay(cell.date)}
-                className="mt-1 grid h-11 w-11 place-items-center rounded-lg text-base font-semibold text-black/75 transition-colors hover:bg-white/55 focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+                className={`mt-1 grid h-11 w-11 place-items-center rounded-lg text-base font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${cell.date === today ? "bg-white/80 text-[#0075de] ring-1 ring-[#0075de]/20" : "text-black/75 hover:bg-white/55"}`}
                 aria-label={`${cell.date} 식단 상세 보기`}
+                aria-current={cell.date === today ? "date" : undefined}
               >
                 {cell.day}
               </button>
@@ -1941,7 +1996,7 @@ function ChatModal({ close, onQueued, targetMonth }: { close: () => void; onQueu
     {
       role: "assistant",
       content:
-        "식단에 관해 물어보거나 변경을 요청해 보세요. 날짜와 원하는 내용을 함께 적으면 레시피와 장보기까지 확인해 반영할게요.",
+        "식단을 물어보거나 직접 관리해 보세요. 날짜와 대상을 정확히 적으면 식단 생성·수정, 레시피 추가·삭제, 장보기와 식사 일정까지 반영할 수 있어요.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -2122,7 +2177,7 @@ function ChatModal({ close, onQueued, targetMonth }: { close: () => void; onQueu
             }}
             disabled={loading}
             className="max-h-28 min-h-11 flex-1 resize-none bg-transparent px-2 py-2 text-base outline-none placeholder:text-black/45 sm:text-sm"
-            placeholder="예: 7일부터 9일까지 부찬을 바꿔줘"
+            placeholder="예: 9월 12일 계란찜 레시피를 삭제해줘"
             aria-label="AI에게 질문하기"
           />
           <button

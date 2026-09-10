@@ -24,6 +24,9 @@ if (
     "validate-day",
     "publish-day",
     "rebuild-shopping",
+    "delete-recipe",
+    "manage-grocery",
+    "update-attendance",
     "reply-chat",
     "record-review",
     "fail-job",
@@ -61,6 +64,9 @@ function usage() {
   node scripts/mealctl.mjs validate-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD
   node scripts/mealctl.mjs publish-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs rebuild-shopping --week YYYY-MM-DD [--request-id ID]
+  node scripts/mealctl.mjs delete-recipe --week YYYY-MM-DD [--title "recipe title" | --all true] [--category CATEGORY] [--date YYYY-MM-DD]
+  node scripts/mealctl.mjs manage-grocery --week YYYY-MM-DD --input /path/action.json
+  node scripts/mealctl.mjs update-attendance --date YYYY-MM-DD --input /path/action.json
   node scripts/mealctl.mjs reply-chat --id REQUEST_ID --input /path/chat-response.json
   node scripts/mealctl.mjs record-review --week YYYY-MM-DD --summary "reason" [--request-id ID]
   node scripts/mealctl.mjs fail-job --request-id REQUEST_ID --error "reason"
@@ -261,6 +267,13 @@ function loadContext(weekStart) {
       'SELECT "id","title","category","plannedDates","sourceUrl","sourceTitle","sourceAuthor","sourceDomain","sourceCheckedAt","needsReview" FROM "Recipe" WHERE "weekKeys" LIKE ? ORDER BY "plannedDates","title"',
     )
     .all(`%${weekStart}%`);
+  const shoppingItems = db
+    .prepare(
+      `SELECT i."name",i."quantity",i."unit",i."category",i."usePlan",i."purchased"
+       FROM "ShoppingItem" i JOIN "ShoppingWeek" w ON w."id"=i."weekId"
+       WHERE w."startDate"=? ORDER BY i."purchased",i."category",i."name"`,
+    )
+    .all(startMs);
   return {
     schemaVersion: "meal-week.v1",
     weekStart,
@@ -299,6 +312,10 @@ function loadContext(weekStart) {
         }
       : null,
     existingRecipes,
+    shoppingItems: shoppingItems.map((item) => ({
+      ...item,
+      purchased: Boolean(item.purchased),
+    })),
     reusableRecipes: reusableRecipesForPlans(mealRows),
     outputContract: {
       weekStart: "YYYY-MM-DD (Sunday)",
@@ -1045,6 +1062,7 @@ function failQueuedAgentJob(requestId, error) {
 
 function publishMonth(payload, month, requestId = null) {
   const selectedMonth = requireMonth(month);
+  const replaceExisting = flags.replace === "true";
   const validation = validateMonth(payload, selectedMonth);
   if (!validation.valid) {
     failQueuedAgentJob(requestId, validation.errors.join("; "));
@@ -1067,6 +1085,50 @@ function publishMonth(payload, month, requestId = null) {
   fs.copyFileSync(dbPath, backupPath);
   try {
     db.exec("BEGIN IMMEDIATE");
+    const existingCount = db
+      .prepare('SELECT COUNT(*) AS "count" FROM "MealPlan" WHERE "monthKey"=?')
+      .get(selectedMonth).count;
+    if (existingCount && !replaceExisting)
+      throw new Error(`${selectedMonth} 월간 식단이 이미 있어 덮어쓰지 않았습니다.`);
+    if (replaceExisting) {
+      const affectedWeeks = new Set(monthDates(selectedMonth).map(sundayFor));
+      const affectedRecipes = db
+        .prepare('SELECT "id","plannedDates" FROM "Recipe" WHERE "plannedDates" LIKE ?')
+        .all(`%${selectedMonth}-%`);
+      const unlinkRecipe = db.prepare(
+        'UPDATE "MealPlan" SET "recipeId"=NULL,"updatedAt"=? WHERE "recipeId"=? AND "monthKey"=?',
+      );
+      const trimRecipe = db.prepare(
+        'UPDATE "Recipe" SET "plannedDates"=?,"weekKeys"=?,"updatedAt"=? WHERE "id"=?',
+      );
+      const deleteRecipe = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
+      for (const recipe of affectedRecipes) {
+        const remainingDates = parseJsonList(recipe.plannedDates).filter(
+          (date) => !String(date).startsWith(`${selectedMonth}-`),
+        );
+        unlinkRecipe.run(now, recipe.id, selectedMonth);
+        if (!remainingDates.length) deleteRecipe.run(recipe.id);
+        else
+          trimRecipe.run(
+            JSON.stringify(remainingDates),
+            JSON.stringify([...new Set(remainingDates.map(sundayFor))].sort()),
+            now,
+            recipe.id,
+          );
+      }
+      db.prepare('DELETE FROM "MealPlan" WHERE "monthKey"=?').run(selectedMonth);
+      const findShoppingWeek = db.prepare(
+        'SELECT "id" FROM "ShoppingWeek" WHERE "startDate"=?',
+      );
+      const clearGeneratedShopping = db.prepare(
+        'DELETE FROM "ShoppingItem" WHERE "weekId"=? AND "usePlan"<>?',
+      );
+      for (const weekStart of affectedWeeks) {
+        const shoppingWeek = findShoppingWeek.get(toMillis(weekStart));
+        if (shoppingWeek)
+          clearGeneratedShopping.run(shoppingWeek.id, "직접 추가");
+      }
+    }
     const insertPlan = db.prepare('INSERT INTO "MealPlan" ("id","date","monthKey","mealType","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote","changeReason","adultServings","childServings","dinnerDiningOut","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const change of payload.mealChanges) {
       const date = String(change.date);
@@ -1088,10 +1150,10 @@ function publishMonth(payload, month, requestId = null) {
         now,
       );
     }
-    const summary = JSON.stringify({ mealChanges: payload.mealChanges.length, recipes: 0, shoppingItems: 0, backup: backupPath, month: selectedMonth });
+    const summary = JSON.stringify({ mealChanges: payload.mealChanges.length, recipes: 0, shoppingItems: 0, backup: backupPath, month: selectedMonth, replaced: Boolean(existingCount) });
     db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?').run("COMPLETED", summary, Date.now(), jobId);
     db.exec("COMMIT");
-    printJson({ success: true, jobId, month: selectedMonth, mealChanges: payload.mealChanges.length, recipes: 0, shoppingItems: 0, backup: backupPath });
+    printJson({ success: true, jobId, month: selectedMonth, mealChanges: payload.mealChanges.length, recipes: 0, shoppingItems: 0, backup: backupPath, replaced: Boolean(existingCount) });
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}
     db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", String(error.message ?? error), Date.now(), jobId);
@@ -1441,6 +1503,213 @@ function rebuildShopping(weekStart, requestId = null) {
   }
 }
 
+function backupDatabase(label) {
+  const backupDir = path.join(root, "data", "backups");
+  fs.mkdirSync(backupDir, { recursive: true });
+  const backupPath = path.join(
+    backupDir,
+    `mealplan-${label}-${new Date().toISOString().replace(/[:.]/g, "-")}.db`,
+  );
+  fs.copyFileSync(dbPath, backupPath);
+  return backupPath;
+}
+
+function deleteRecipeForChat(weekStart, title, category = null, date = null, deleteAll = false) {
+  const selectedWeek = requireWeek(weekStart);
+  const selectedTitle = String(title ?? "").trim();
+  if ((!deleteAll && !selectedTitle) || selectedTitle.length > 120)
+    fail("--title is required unless --all true is provided.");
+  if (category && !["주찬", "반찬", "점심"].includes(category))
+    fail("--category must be 주찬, 반찬, or 점심.");
+  if (date && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || sundayFor(date) !== selectedWeek))
+    fail("--date must be inside the selected week.");
+  const rows = db
+    .prepare(
+      `SELECT "id","title","category","plannedDates" FROM "Recipe"
+       WHERE (?=1 OR "title"=?) AND "weekKeys" LIKE ?
+       ORDER BY "updatedAt" DESC`,
+    )
+    .all(deleteAll ? 1 : 0, selectedTitle, `%${selectedWeek}%`)
+    .filter(
+      (recipe) =>
+        (!category || recipe.category === category) &&
+        (!date || parseJsonList(recipe.plannedDates).includes(date)),
+    );
+  if (!rows.length)
+    fail(
+      deleteAll
+        ? "선택한 주차에 삭제할 레시피가 없습니다."
+        : `선택한 주차에서 '${selectedTitle}' 레시피를 찾지 못했습니다.`,
+    );
+  const backupPath = backupDatabase("recipe-delete");
+  const now = Date.now();
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    const unlink = db.prepare(
+      'UPDATE "MealPlan" SET "recipeId"=NULL,"updatedAt"=? WHERE "recipeId"=?',
+    );
+    const remove = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
+    for (const recipe of rows) {
+      unlink.run(now, recipe.id);
+      remove.run(recipe.id);
+    }
+    const shopping = writeShopping(
+      selectedWeek,
+      storedRecipes(selectedWeek, { skipInvalid: true }),
+      now,
+    );
+    db.exec("COMMIT");
+    printJson({
+      success: true,
+      weekStart: selectedWeek,
+      deleted: rows.map((recipe) => ({
+        title: recipe.title,
+        category: recipe.category,
+        plannedDates: parseJsonList(recipe.plannedDates),
+      })),
+      shoppingItems: shopping.length,
+      backup: backupPath,
+    });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+}
+
+function manageGroceryForChat(payload, weekStart) {
+  const selectedWeek = requireWeek(weekStart);
+  const operation = String(payload?.operation ?? "");
+  const name = String(payload?.name ?? "").trim();
+  if (!name || name.length > 80) fail("장보기 품목명은 1~80자여야 합니다.");
+  if (!["add", "delete", "set_purchased"].includes(operation))
+    fail("지원하지 않는 장보기 작업입니다.");
+  const backupPath = backupDatabase("grocery");
+  const now = Date.now();
+  const startMs = toMillis(selectedWeek);
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    db.prepare(
+      'INSERT OR IGNORE INTO "ShoppingWeek" ("id","startDate","endDate","createdAt") VALUES (?,?,?,?)',
+    ).run(
+      `shopping-week-${selectedWeek}`,
+      startMs,
+      toMillis(addDays(selectedWeek, 6)),
+      now,
+    );
+    const week = db
+      .prepare('SELECT "id" FROM "ShoppingWeek" WHERE "startDate"=?')
+      .get(startMs);
+    if (operation === "add") {
+      const quantity = Number(payload.quantity ?? 1);
+      const unit = String(payload.unit ?? "개").trim();
+      if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 100000)
+        throw new Error("장보기 수량은 0보다 큰 숫자여야 합니다.");
+      if (!unit || unit.length > 12) throw new Error("장보기 단위가 올바르지 않습니다.");
+      db.prepare(
+        `INSERT INTO "ShoppingItem" ("id","name","quantity","unit","category","ownedQuantity","usePlan","purchased","weekId")
+         VALUES (?,?,?,?,?,?,?,?,?)
+         ON CONFLICT("weekId","name") DO UPDATE SET "quantity"=excluded."quantity","unit"=excluded."unit","category"=excluded."category"`,
+      ).run(
+        `manual-${crypto.createHash("sha1").update(`${selectedWeek}|${name}`).digest("hex").slice(0, 16)}`,
+        name,
+        quantity,
+        unit,
+        String(payload.category ?? "기타").trim().slice(0, 40) || "기타",
+        0,
+        "직접 추가",
+        0,
+        week.id,
+      );
+    } else if (operation === "delete") {
+      const result = db
+        .prepare('DELETE FROM "ShoppingItem" WHERE "weekId"=? AND "name"=?')
+        .run(week.id, name);
+      if (!result.changes) throw new Error(`장보기에서 '${name}' 품목을 찾지 못했습니다.`);
+    } else {
+      if (typeof payload.purchased !== "boolean")
+        throw new Error("구매 완료 여부가 필요합니다.");
+      const result = db
+        .prepare('UPDATE "ShoppingItem" SET "purchased"=? WHERE "weekId"=? AND "name"=?')
+        .run(payload.purchased ? 1 : 0, week.id, name);
+      if (!result.changes) throw new Error(`장보기에서 '${name}' 품목을 찾지 못했습니다.`);
+    }
+    db.exec("COMMIT");
+    printJson({
+      success: true,
+      operation,
+      weekStart: selectedWeek,
+      name,
+      backup: backupPath,
+    });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+}
+
+function updateAttendanceForChat(payload, date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? "") || Number.isNaN(toMillis(date)))
+    fail("--date must be YYYY-MM-DD.");
+  const hasDiningOut = typeof payload?.dinnerDiningOut === "boolean";
+  const attendance = Array.isArray(payload?.attendance) ? payload.attendance : [];
+  if (!hasDiningOut && !attendance.length)
+    fail("변경할 외식 또는 식사 여부가 없습니다.");
+  const backupPath = backupDatabase("attendance");
+  const now = Date.now();
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    if (hasDiningOut) {
+      const changed = db
+        .prepare('UPDATE "MealPlan" SET "dinnerDiningOut"=?,"updatedAt"=? WHERE "date"=?')
+        .run(payload.dinnerDiningOut ? 1 : 0, now, toMillis(date));
+      if (!changed.changes) throw new Error(`${date} 식단을 찾지 못했습니다.`);
+    }
+    const findMember = db.prepare(
+      'SELECT "id","name","role" FROM "FamilyMember" WHERE "role"=? LIMIT 1',
+    );
+    const findSchedule = db.prepare(
+      'SELECT * FROM "FamilySchedule" WHERE "date"=? AND "memberId"=?',
+    );
+    const upsert = db.prepare(
+      `INSERT INTO "FamilySchedule" ("id","date","memberId","isWorking","eatsAtCompany","isAway","lunchNotAtHome","dinnerNotAtHome","note")
+       VALUES (?,?,?,?,?,?,?,?,?)
+       ON CONFLICT("date","memberId") DO UPDATE SET "lunchNotAtHome"=excluded."lunchNotAtHome","dinnerNotAtHome"=excluded."dinnerNotAtHome"`,
+    );
+    for (const item of attendance) {
+      const role = String(item?.role ?? "");
+      if (!["father", "mother"].includes(role))
+        throw new Error("식사 여부는 아빠 또는 엄마만 변경할 수 있습니다.");
+      const member = findMember.get(role);
+      if (!member) throw new Error(`${role} 가족 정보를 찾지 못했습니다.`);
+      const current = findSchedule.get(toMillis(date), member.id);
+      const lunchNotAtHome =
+        typeof item.lunchNotAtHome === "boolean"
+          ? item.lunchNotAtHome
+          : Boolean(current?.lunchNotAtHome);
+      const dinnerNotAtHome =
+        typeof item.dinnerNotAtHome === "boolean"
+          ? item.dinnerNotAtHome
+          : Boolean(current?.dinnerNotAtHome);
+      upsert.run(
+        current?.id ?? `schedule-${role}-${date}`,
+        toMillis(date),
+        member.id,
+        current?.isWorking ?? 0,
+        current?.eatsAtCompany ?? 0,
+        current?.isAway ?? 0,
+        lunchNotAtHome ? 1 : 0,
+        dinnerNotAtHome ? 1 : 0,
+        current?.note ?? null,
+      );
+    }
+    db.exec("COMMIT");
+    printJson({ success: true, date, dinnerDiningOut: payload.dinnerDiningOut, attendance, backup: backupPath });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+}
+
 function replyChat(payload, id) {
   if (!String(id ?? "").trim() || String(id).length > 120)
     fail("--id is required.");
@@ -1623,6 +1892,18 @@ try {
     );
   if (command === "rebuild-shopping")
     rebuildShopping(requireWeek(flags.week), flags["request-id"]);
+  if (command === "delete-recipe")
+    deleteRecipeForChat(
+      requireWeek(flags.week),
+      flags.title,
+      flags.category,
+      flags.date,
+      flags.all === "true",
+    );
+  if (command === "manage-grocery")
+    manageGroceryForChat(readPayload(flags.input), requireWeek(flags.week));
+  if (command === "update-attendance")
+    updateAttendanceForChat(readPayload(flags.input), flags.date);
   if (command === "reply-chat") replyChat(readPayload(flags.input), flags.id);
   if (command === "record-review")
     recordReview(requireWeek(flags.week), flags.summary, flags["request-id"]);
