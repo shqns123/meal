@@ -127,6 +127,24 @@ function validate(command, payload, args) {
     fs.rmSync(input, { force: true });
   }
 }
+function validationProblems(validation) {
+  if (Array.isArray(validation?.errors)) {
+    const errors = validation.errors
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    if (errors.length) return errors;
+  }
+  if (typeof validation?.error === "string" && validation.error.trim())
+    return [validation.error.trim()];
+  return ["검증기가 실패했지만 상세 오류를 반환하지 않았습니다. 컨테이너 로그를 확인해 주세요."];
+}
+function normalizeMonthPayload(payload, month) {
+  return {
+    ...(payload && typeof payload === "object" ? payload : {}),
+    schemaVersion: "meal-month.v1",
+    month,
+  };
+}
 function notify() {
   try {
     ctl("notify-web", ...(task.kind === "chat" ? ["--chat-id", task.requestId] : ["--request-id", task.requestId]));
@@ -315,9 +333,7 @@ async function runChatMonthAction(ruleFiles, decision) {
     false,
   );
   const scope = `${month}의 모든 날짜를 한 번씩 포함하는 월간 식단이며 레시피와 장보기는 만들지 않는다.`;
-  let payload = modelJson(result.content);
-  payload.schemaVersion = "meal-month.v1";
-  payload.month = month;
+  let payload = normalizeMonthPayload(modelJson(result.content), month);
   payload = await completePayload(
     payload,
     current,
@@ -325,11 +341,12 @@ async function runChatMonthAction(ruleFiles, decision) {
     scope,
     (candidate) => validate(
       "validate-month",
-      candidate,
+      normalizeMonthPayload(candidate, month),
       ["--month", month, ...(replacing ? ["--replace", "true"] : [])],
     ),
     false,
   );
+  payload = normalizeMonthPayload(payload, month);
   publish(
     "publish-month",
     writeInput(`chat-month-${month}`, payload),
@@ -621,9 +638,7 @@ async function completePayload(payload, current, ruleFiles, scope, runValidation
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const validation = runValidation(candidate);
     if (validation.valid) return candidate;
-    const problems = Array.isArray(validation.errors)
-      ? validation.errors
-      : ["저장 검증을 통과하지 못했습니다."];
+    const problems = validationProblems(validation);
     const result = await ask(
       systemPrompt(ruleFiles) + "\n\n직전 JSON이 저장 검증에 실패했다. 아래 오류를 모두 해결한 완전한 교체 JSON만 반환한다. 레시피 출처 오류가 있으면 웹 검색과 원문 읽기로 확인하고, 확인하지 못한 URL을 추측해서 채우면 안 된다.",
       "[현재 컨텍스트]\n" + JSON.stringify(current) + "\n[작업 범위]\n" + scope + "\n[검증 오류]\n" + problems.join("\n") + "\n[수정할 JSON]\n" + JSON.stringify(candidate),
@@ -633,7 +648,10 @@ async function completePayload(payload, current, ruleFiles, scope, runValidation
     candidate = modelJson(result.content);
   }
   const validation = runValidation(candidate);
-  throw new Error("AI 결과가 저장 검증을 통과하지 못했습니다: " + String(validation.errors || "알 수 없는 검증 오류").slice(0, 1800));
+  throw new Error(
+    "AI 결과가 저장 검증을 통과하지 못했습니다: " +
+      validationProblems(validation).join("; ").slice(0, 1800),
+  );
 }
 
 async function runChat() {
@@ -679,17 +697,20 @@ async function runPlanner() {
       "[월간 컨텍스트]\n" + JSON.stringify(current) + "\n[요청]\n" + task.prompt +
       "\n" + task.targetMonth + "의 모든 날짜를 포함한 meal-month.v1 JSON만 반환한다. 레시피·장보기는 만들지 않는다.");
     const scope = task.targetMonth + "의 모든 날짜를 한 번씩 포함하는 월간 식단이며 레시피와 장보기는 만들지 않는다.";
-    let payload = modelJson(result.content);
-    payload.schemaVersion = "meal-month.v1";
-    payload.month = task.targetMonth;
+    let payload = normalizeMonthPayload(modelJson(result.content), task.targetMonth);
     payload = await completePayload(
       payload,
       current,
       ruleFiles,
       scope,
-      (candidate) => validate("validate-month", candidate, ["--month", task.targetMonth]),
+      (candidate) => validate(
+        "validate-month",
+        normalizeMonthPayload(candidate, task.targetMonth),
+        ["--month", task.targetMonth],
+      ),
       false,
     );
+    payload = normalizeMonthPayload(payload, task.targetMonth);
     publish("publish-month", writeInput("month-" + task.targetMonth, payload),
       ["--month", task.targetMonth, "--request-id", task.requestId]);
     notify(); return;
