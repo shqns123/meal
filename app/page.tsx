@@ -109,6 +109,14 @@ type ChatMessage = {
   content: string;
   sources?: { title?: string; url: string }[];
 };
+const CHAT_STORAGE_KEY = "meal-ai-chat-messages";
+const INITIAL_CHAT_MESSAGES: ChatMessage[] = [
+  {
+    role: "assistant",
+    content:
+      "식단을 물어보거나 직접 관리해 보세요. 날짜와 대상을 정확히 적으면 식단 생성·수정, 레시피 추가·삭제, 장보기와 식사 일정까지 반영할 수 있어요.",
+  },
+];
 type WeeklyReviewRequest = {
   weekStart: string;
   referenceDate: string;
@@ -139,6 +147,11 @@ export default function Home() {
   const [agentRequest, setAgentRequest] = useState<AgentRequest | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(
+    INITIAL_CHAT_MESSAGES,
+  );
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatStorageReady, setChatStorageReady] = useState(false);
   const [mealItems, setMealItems] = useState(seedMeals);
   const [recipes, setRecipes] = useState(seedRecipes);
   const [grocery, setGrocery] = useState(seedGrocery);
@@ -189,6 +202,36 @@ export default function Home() {
     if (window.isSecureContext && "serviceWorker" in navigator)
       void navigator.serviceWorker.register("/push-worker.js").catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) ?? "[]");
+      if (Array.isArray(parsed)) {
+        const saved = parsed
+          .filter(
+            (message): message is ChatMessage =>
+              Boolean(message) &&
+              (message.role === "user" || message.role === "assistant") &&
+              typeof message.content === "string" &&
+              message.content.trim().length > 0,
+          )
+          .slice(-60);
+        if (saved.length) setChatMessages(saved);
+      }
+    } catch {
+      localStorage.removeItem(CHAT_STORAGE_KEY);
+    } finally {
+      setChatStorageReady(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!chatStorageReady) return;
+    localStorage.setItem(
+      CHAT_STORAGE_KEY,
+      JSON.stringify(chatMessages.slice(-60)),
+    );
+  }, [chatMessages, chatStorageReady]);
 
   useEffect(() => {
     try {
@@ -490,6 +533,10 @@ export default function Home() {
           close={() => setChatOpen(false)}
           onQueued={queueAgentChat}
           targetMonth={selectedMonth}
+          messages={chatMessages}
+          setMessages={setChatMessages}
+          loading={chatLoading}
+          setLoading={setChatLoading}
         />
       )}
       <AgentCompletionMonitor jobs={pendingJobs} onFinished={finishAgentJob} />
@@ -1991,16 +2038,24 @@ function ScheduleCheck({
     </label>
   );
 }
-function ChatModal({ close, onQueued, targetMonth }: { close: () => void; onQueued: (chat: PendingAgentChat) => void; targetMonth: string }) {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      role: "assistant",
-      content:
-        "식단을 물어보거나 직접 관리해 보세요. 날짜와 대상을 정확히 적으면 식단 생성·수정, 레시피 추가·삭제, 장보기와 식사 일정까지 반영할 수 있어요.",
-    },
-  ]);
+function ChatModal({
+  close,
+  onQueued,
+  targetMonth,
+  messages,
+  setMessages,
+  loading,
+  setLoading,
+}: {
+  close: () => void;
+  onQueued: (chat: PendingAgentChat) => void;
+  targetMonth: string;
+  messages: ChatMessage[];
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  loading: boolean;
+  setLoading: React.Dispatch<React.SetStateAction<boolean>>;
+}) {
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
   const messageArea = useRef<HTMLDivElement>(null);
   useEffect(() => {
     messageArea.current?.scrollTo({
@@ -2008,6 +2063,11 @@ function ChatModal({ close, onQueued, targetMonth }: { close: () => void; onQueu
       behavior: "smooth",
     });
   }, [messages, loading]);
+  const resetConversation = () => {
+    setMessages([...INITIAL_CHAT_MESSAGES]);
+    setInput("");
+    localStorage.removeItem(CHAT_STORAGE_KEY);
+  };
   const send = async () => {
     const content = input.trim();
     if (!content || loading) return;
@@ -2105,15 +2165,27 @@ function ChatModal({ close, onQueued, targetMonth }: { close: () => void; onQueu
             우리집 식탁에게 물어보기
           </h2>
         </div>
-        <button
-          data-autofocus
-          type="button"
-          onClick={close}
-          className="grid h-11 w-11 place-items-center rounded-lg text-xl text-black/50 hover:bg-black/[.05]"
-          aria-label="AI 채팅 닫기"
-        >
-          ×
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={resetConversation}
+            disabled={loading || messages.length <= 1}
+            className="grid h-11 w-11 place-items-center rounded-lg text-black/50 transition-colors hover:bg-black/[.05] hover:text-black disabled:cursor-not-allowed disabled:opacity-30"
+            aria-label="대화 내용 지우기"
+            title="대화 내용 지우기"
+          >
+            <Trash2 size={18} aria-hidden="true" />
+          </button>
+          <button
+            data-autofocus
+            type="button"
+            onClick={close}
+            className="grid h-11 w-11 place-items-center rounded-lg text-xl text-black/50 hover:bg-black/[.05]"
+            aria-label="AI 채팅 닫기"
+          >
+            ×
+          </button>
+        </div>
       </div>
       <div
         ref={messageArea}

@@ -1735,7 +1735,7 @@ function replyChat(payload, id) {
     : [];
   const result = db
     .prepare(
-      'UPDATE "AgentChat" SET "status"=?,"answer"=?,"sources"=?,"error"=NULL,"completedAt"=? WHERE "id"=? AND "status"="RUNNING"',
+      `UPDATE "AgentChat" SET "status"=?,"answer"=?,"sources"=?,"error"=NULL,"completedAt"=? WHERE "id"=? AND "status"='RUNNING'`,
     )
     .run("COMPLETED", answer, JSON.stringify(sources), Date.now(), id);
   if (result.changes !== 1)
