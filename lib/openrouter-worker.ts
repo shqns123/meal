@@ -23,7 +23,9 @@ export function openRouterConfigured() {
 }
 
 export function queueOpenRouterTask(task: QueuedTask) {
-  const root = process.cwd();
+  // Next standalone changes cwd to `.next/standalone` in production. Resolve
+  // workers and rule files from the real application root instead.
+  const root = process.env.MEAL_PLAN_ROOT?.trim() || process.cwd();
   const directory = path.join(root, "data", "agent-requests");
   fs.mkdirSync(directory, { recursive: true });
   const requestPath = path.join(directory, `${task.kind}-${task.requestId}-${randomUUID()}.json`);

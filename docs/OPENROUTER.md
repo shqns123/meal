@@ -41,3 +41,8 @@ docker compose up -d --build
 ```
 
 앱 컨테이너만 재빌드하면 된다. Hermes 컨테이너나 공유 마운트는 필요하지 않다.
+
+Synology NAS에서는 빌드와 실행 모두 호스트 네트워크를 사용한다. 앱은 호스트의
+`7000` 포트에서 직접 실행되며 별도의 `ports` 매핑은 사용하지 않는다. 이 구성은
+NAS 호스트의 DNS를 그대로 이용하므로 브리지 네트워크에서 발생할 수 있는
+`getaddrinfo EAI_AGAIN openrouter.ai` 오류를 피한다.

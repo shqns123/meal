@@ -5,10 +5,15 @@ services:
     build:
       context: .
       network: host
-    ports:
-      - "7000:3000"
+    network_mode: host
+    env_file:
+      - .env
     environment:
+      PORT: 7000
+      TZ: Asia/Seoul
+      NODE_ENV: production
       DATABASE_URL: file:/app/data/mealplan.db
+      MEAL_PLAN_ROOT: /app
       APP_LOGIN_ID: ${APP_LOGIN_ID:-}
       APP_LOGIN_PASSWORD: ${APP_LOGIN_PASSWORD:-}
       AUTH_SECRET: ${AUTH_SECRET:-}
@@ -23,6 +28,6 @@ services:
       VAPID_SUBJECT: ${VAPID_SUBJECT:-}
       MEAL_APP_NOTIFY_TOKEN: ${MEAL_APP_NOTIFY_TOKEN:-}
       # The direct OpenRouter worker runs inside this same container.
-      MEAL_APP_NOTIFY_URL: http://127.0.0.1:3000/api/push/notify
+      MEAL_APP_NOTIFY_URL: http://127.0.0.1:7000/api/push/notify
     volumes:
       - ./data:/app/data
