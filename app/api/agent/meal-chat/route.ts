@@ -7,6 +7,7 @@ import { openRouterConfigured, queueOpenRouterTask } from "@/lib/openrouter-work
 type ChatRequest = {
   message?: string;
   targetMonth?: string;
+  weekStart?: string;
   conversation?: { role: "user" | "assistant"; content: string }[];
 };
 
@@ -36,6 +37,11 @@ export async function POST(request: Request) {
   if (body.targetMonth && !/^\d{4}-(0[1-9]|1[0-2])$/.test(body.targetMonth))
     return NextResponse.json(
       { error: "선택한 월이 올바르지 않습니다." },
+      { status: 400 },
+    );
+  if (body.weekStart && !validWeekStart(body.weekStart))
+    return NextResponse.json(
+      { error: "선택한 주차가 올바르지 않습니다." },
       { status: 400 },
     );
 
@@ -69,7 +75,7 @@ export async function POST(request: Request) {
       message,
       conversation,
       targetMonth: body.targetMonth ?? currentKstMonth(),
-      weekStart: sundayForKst(),
+      weekStart: body.weekStart ?? sundayForKst(),
     });
     return NextResponse.json({ id: requestId, pending: true }, { status: 202 });
   } catch {
@@ -113,6 +119,12 @@ function sundayForKst() {
   return date.toISOString().slice(0, 10);
 }
 
+function validWeekStart(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.getUTCDay() === 0;
+}
+
 export async function GET(request: Request) {
   const id = new URL(request.url).searchParams.get("id");
   if (!id)
@@ -134,7 +146,7 @@ export async function GET(request: Request) {
     );
   if (
     chat.status === "RUNNING" &&
-    Date.now() - chat.createdAt.getTime() > 10 * 60_000
+    Date.now() - chat.createdAt.getTime() > 60 * 60_000
   ) {
     const expired = await prisma.agentChat.update({
       where: { id },

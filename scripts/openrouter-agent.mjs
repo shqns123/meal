@@ -7,6 +7,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { selectedMutationMonth } from "../lib/agent-request-utils.mjs";
 
 const root = process.env.MEAL_PLAN_ROOT || process.cwd();
 const queuedPath = process.argv[2];
@@ -188,7 +189,7 @@ function citations(annotations) {
     .map((value) => ({ title: value.title || undefined, url: value.url }));
 }
 function requestsMealDataChange(message) {
-  if (/(앞으로|다음에도|먹어봤|생소|익숙|취향|넣어도|피해주세요)/.test(String(message || ""))) return true;
+  if (/(앞으로|다음에도|먹어봤|생소|익숙|취향|넣어도|피해주세요|좋아(?:해|요)?|싫어(?:해|요)?)/.test(String(message || ""))) return true;
   const text = String(message || "").replace(/\s+/g, " ");
   const mentionsMealData =
     /(월간|주간|식단|메뉴|주찬|부찬|반찬|점심|저녁|레시피|장보기|외식|미식사|식사\s*여부|집에서\s*(?:먹|식사)|냉장고|펜트리|보유\s*재료|재고|가족|알레르기|선호|기피|씹기|매운맛|주간\s*점검|일정|출근|출장|부재|회사\s*식사)/.test(text);
@@ -202,11 +203,17 @@ function effectiveMutationInstruction() {
     String(task.message || ""),
   );
   if (!followUp) return null;
-  const previous = [...(task.conversation || [])]
+  const recent = (task.conversation || []).slice(-4);
+  const previousRequest = [...recent]
     .reverse()
     .find((item) => item.role === "user" && requestsMealDataChange(item.content));
-  return previous
-    ? `[이전 요청]\n${previous.content}\n[현재 후속 요청]\n${task.message}`
+  if (previousRequest)
+    return `[이전 요청]\n${previousRequest.content}\n[현재 후속 요청]\n${task.message}`;
+  const previousAnswer = [...recent]
+    .reverse()
+    .find((item) => item.role === "assistant" && String(item.content || "").trim());
+  return previousAnswer
+    ? `[직전 AI 답변]\n${previousAnswer.content}\n[현재 사용자의 실행 요청]\n${task.message}`
     : null;
 }
 function confirmationQuestion(decisions, instruction) {
@@ -255,6 +262,14 @@ function validWeek(value) {
 }
 async function classifyChatMutations(ruleFiles) {
   const targetMonth = selectedMutationMonth(task.message, task.targetMonth);
+  if (
+    /(?:예산|식비)[^\n]{0,30}\d[\d,]*(?:만\s*)?원[^\n]{0,20}(?:안으로|이하|넘지|맞춰)/.test(String(task.message || "")) &&
+    /(?:식단|메뉴|짜|구성|만들)/.test(String(task.message || ""))
+  )
+    return [{
+      intent: "CLARIFY",
+      answer: "현재는 식재료의 실제 판매 가격 데이터가 없어 정확한 금액 상한을 보장할 수 없습니다. 저렴한 재료 중심으로 구성할 수는 있지만, 금액 제한을 적용하려면 기준 가격이나 최근 장보기 가격이 필요합니다.",
+    }];
   if (validMonth(targetMonth) && isExplicitMonthReplacementRequest(task.message))
     return [{ intent: "RESET_MONTH", month: targetMonth, weekStart: task.weekStart }];
   const result = await ask(
@@ -268,8 +283,8 @@ intent는 UPDATE_MEALS, GENERATE_MONTH, RESET_MONTH, REGENERATE_RECIPES, ADD_REC
 날짜·제목·품목이 불명확하여 여러 대상을 바꿀 수 있으면 CLARIFY와 자연스러운 한국어 answer를 반환한다.
 이번 주는 ${task.weekStart}, 선택 월은 ${targetMonth}, 오늘은 ${currentKstDate()}다.
 레시피를 모두·전부·전체 삭제하라는 명시적 요청에만 all을 true로 한다.
-서로 독립된 변경이 여러 개면 actions에 각각 넣는다. 한 작업의 대상이 모호하면 CLARIFY 하나만 반환한다. 최대 5개다.
-형식: {"actions":[{"intent":"...","answer":"확인 질문 또는 빈 문자열","month":"YYYY-MM","weekStart":"YYYY-MM-DD 일요일","date":"YYYY-MM-DD 또는 null","dates":["YYYY-MM-DD"],"title":"레시피 제목 또는 null","category":"주찬|반찬|점심|null","all":false,"groceryName":"품목명 또는 null","quantity":1,"unit":"개","groceryCategory":"기타","purchased":true,"pantry":{"operation":"upsert|adjust|delete","name":"재료명","quantity":1,"unit":"g","category":"채소","expiresAt":"YYYY-MM-DD 또는 null"},"preference":{"name":"정확한 메뉴명","category":"주찬|부찬|점심|아기","scope":"family|father|mother|child","usage":"UNKNOWN|ALLOW|AVOID (사용 여부를 말한 경우만)","familiarity":"UNKNOWN|FAMILIAR|UNFAMILIAR (익숙함을 말한 경우만)","note":"명시한 메모만"},"familyUpdate":{"role":"father|mother|child","name":null,"allergies":null,"chewingAbility":null,"spiceTolerance":null,"dietaryNotes":null},"weeklyReview":{"referenceDate":"YYYY-MM-DD","wantedFoods":null,"avoidFoods":null,"note":null},"dinnerDiningOut":null,"attendance":[{"role":"father|mother","lunchNotAtHome":true,"dinnerNotAtHome":false,"isWorking":null,"eatsAtCompany":null,"isAway":null,"note":null}]}]}`,
+서로 독립된 변경이 여러 개면 actions에 각각 넣는다. 한 작업의 대상이 모호하면 CLARIFY 하나만 반환한다. 최대 20개다. 가격 데이터가 없는 상태에서 정확한 예산 상한을 요구하면 저장하지 말고 CLARIFY로 현재는 금액 준수를 보장할 수 없다고 답한다.
+형식: {"actions":[{"intent":"...","answer":"확인 질문 또는 빈 문자열","month":"YYYY-MM","weekStart":"YYYY-MM-DD 일요일","date":"YYYY-MM-DD 또는 null","dates":["YYYY-MM-DD"],"title":"레시피 제목 또는 null","category":"주찬|반찬|점심|null","all":false,"groceryName":"품목명 또는 null","quantity":1,"unit":"개","groceryCategory":"기타","purchased":true,"pantry":{"operation":"upsert|adjust|delete","name":"재료명","quantity":1,"unit":"g|kg|ml|L|개|팩|봉|병|캔|모|단|통|장|마리","category":"냉장|냉동|실온|기타","expiresAt":"YYYY-MM-DD 또는 null"},"preference":{"name":"정확한 메뉴명","category":"주찬|부찬|점심|아기","scope":"family|father|mother|child","usage":"UNKNOWN|ALLOW|AVOID (사용 여부를 말한 경우만)","familiarity":"UNKNOWN|FAMILIAR|UNFAMILIAR (익숙함을 말한 경우만)","note":"명시한 메모만"},"familyUpdate":{"role":"father|mother|child","name":null,"allergies":null,"chewingAbility":null,"spiceTolerance":null,"dietaryNotes":null},"weeklyReview":{"referenceDate":"YYYY-MM-DD","wantedFoods":null,"avoidFoods":null,"note":null},"dinnerDiningOut":null,"attendance":[{"role":"father|mother","lunchNotAtHome":true,"dinnerNotAtHome":false,"isWorking":null,"eatsAtCompany":null,"isAway":null,"note":null}]}]}`,
     `[사용자 요청]\n${task.message}\n[현재 주간 컨텍스트]\n${JSON.stringify(context(task.weekStart))}`,
     false,
   );
@@ -280,10 +295,12 @@ intent는 UPDATE_MEALS, GENERATE_MONTH, RESET_MONTH, REGENERATE_RECIPES, ADD_REC
     "DELETE_GROCERY", "SET_GROCERY_PURCHASED", "MANAGE_PANTRY",
     "UPDATE_FAMILY", "UPDATE_WEEKLY_REVIEW", "UPDATE_PREFERENCE", "UPDATE_ATTENDANCE", "CLARIFY",
   ]);
-  const decisions = (Array.isArray(classified.actions)
+  const rawDecisions = Array.isArray(classified.actions)
     ? classified.actions
-    : [classified])
-    .slice(0, 5)
+    : [classified];
+  if (rawDecisions.length > 20)
+    return [{ intent: "CLARIFY", answer: "한 번에 처리할 변경이 20개를 넘습니다. 날짜나 항목을 나누어 요청해 주세요." }];
+  const decisions = rawDecisions
     .map((decision) => {
       if (!decision || !allowed.has(decision.intent))
         return { intent: "CLARIFY", answer: "어떤 항목을 어떻게 변경할지 조금 더 구체적으로 알려주세요." };
@@ -303,15 +320,6 @@ intent는 UPDATE_MEALS, GENERATE_MONTH, RESET_MONTH, REGENERATE_RECIPES, ADD_REC
   return decisions.length
     ? decisions
     : [{ intent: "CLARIFY", answer: "어떤 항목을 어떻게 변경할지 조금 더 구체적으로 알려주세요." }];
-}
-function selectedMutationMonth(message, fallbackMonth) {
-  const text = String(message || "");
-  const full = text.match(/(20\d{2})\s*[년./-]\s*(1[0-2]|0?[1-9])\s*월?/);
-  if (full) return `${full[1]}-${String(Number(full[2])).padStart(2, "0")}`;
-  const monthOnly = text.match(/(?:^|\s)(1[0-2]|0?[1-9])\s*월/);
-  if (monthOnly && /^\d{4}-\d{2}$/.test(fallbackMonth || ""))
-    return `${fallbackMonth.slice(0, 4)}-${String(Number(monthOnly[1])).padStart(2, "0")}`;
-  return fallbackMonth;
 }
 function selectedResetStartDate(message, month) {
   const text = String(message || "");
@@ -389,23 +397,21 @@ async function runChatMealChange(ruleFiles) {
       sources: citations(result.annotations),
     };
   }
-  if (changes.length > 7)
-    throw new Error("채팅에서는 한 번에 최대 7일까지만 변경할 수 있습니다.");
+  if (changes.length > 31)
+    throw new Error("채팅에서는 한 번에 최대 31일까지만 변경할 수 있습니다.");
   const dates = changes.map((change) => String(change.date || ""));
   if (
     new Set(dates).size !== dates.length ||
     dates.some((date) => !/^\d{4}-\d{2}-\d{2}$/.test(date) || !date.startsWith(`${targetMonth}-`))
   )
     throw new Error(`변경 날짜는 ${targetMonth} 안에서 중복 없이 지정해야 합니다.`);
-  const weeks = new Set(dates.map(sundayForDate));
-  if (weeks.size !== 1)
-    throw new Error("한 번의 채팅 요청에서는 같은 일요일~토요일 주차의 날짜만 함께 변경할 수 있습니다.");
-  const weekStart = [...weeks][0];
-  const current = context(weekStart);
-  const existingDates = new Set(current.meals.map((meal) => meal.date));
+  const existingDates = new Set(month.existingMonthMeals.map((meal) => meal.date));
   if (dates.some((date) => !existingDates.has(date)))
     throw new Error("요청한 날짜 중 저장된 식단이 없는 날이 있습니다.");
+  const validatedChanges = [];
   for (const change of changes) {
+    const weekStart = sundayForDate(change.date);
+    const current = context(weekStart);
     let dayPayload = {
       schemaVersion: "meal-week.v1",
       weekStart,
@@ -426,23 +432,31 @@ async function runChatMealChange(ruleFiles) {
       false,
     );
     dayPayload.recipes = [];
-    publish(
-      "publish-day",
-      writeInput("chat-change-" + change.date, dayPayload),
-      ["--week", weekStart, "--date", change.date],
-    );
+    validatedChanges.push(dayPayload.mealChanges[0]);
   }
-  let recipeStatus = "관련 레시피는 별도 재생성 작업이 필요합니다.";
-  try {
-    await generateWeekRecipes(
-      ruleFiles,
-      weekStart,
-      `${dates.join(", ")} 변경 메뉴의 레시피를 보충하고 기존에 검증된 레시피는 재사용한다.`,
-    );
-    recipeStatus = "관련 레시피와 장보기도 다시 계산했습니다.";
-  } catch (error) {
-    console.warn("Meal changes were saved but recipe refresh failed:", error instanceof Error ? error.message : error);
+  const combinedPayload = {
+    schemaVersion: "meal-days.v1",
+    changeReason: String(requested.changeReason || task.message).slice(0, 1000),
+    mealChanges: validatedChanges,
+  };
+  publish("publish-days", writeInput("chat-days", combinedPayload), []);
+  const weeks = [...new Set(dates.map(sundayForDate))];
+  const failedRecipeWeeks = [];
+  for (const weekStart of weeks) {
+    try {
+      await generateWeekRecipes(
+        ruleFiles,
+        weekStart,
+        `${dates.filter((date) => sundayForDate(date) === weekStart).join(", ")} 변경 메뉴의 레시피를 보충하고 기존에 검증된 레시피는 재사용한다.`,
+      );
+    } catch (error) {
+      failedRecipeWeeks.push(weekStart);
+      console.warn("Meal changes were saved but recipe refresh failed:", error instanceof Error ? error.message : error);
+    }
   }
+  const recipeStatus = failedRecipeWeeks.length
+    ? `식단은 모두 저장했지만 ${failedRecipeWeeks.join(", ")} 주차의 레시피와 장보기 갱신은 완료하지 못했습니다.`
+    : "관련 레시피와 장보기도 다시 계산했습니다.";
   return {
     answer: `${String(requested.answer || "").trim() || `${dates.join(", ")} 식단을 변경했습니다.`} ${recipeStatus}`,
     sources: citations(result.annotations),
@@ -875,15 +889,34 @@ async function runChat() {
     task.message = mutationInstruction;
     const decisions = await classifyChatMutations(ruleFiles);
     const clarification = decisions.find((decision) => decision.intent === "CLARIFY");
+    const multipleActions = !clarification && decisions.length > 1;
     const confirmation = clarification
       ? null
       : confirmationQuestion(decisions, mutationInstruction);
     const responses = [];
     if (clarification) responses.push(await dispatchChatMutation(ruleFiles, clarification));
+    else if (multipleActions)
+      responses.push({
+        answer: `서로 독립된 변경 ${decisions.length}개가 함께 요청됐습니다. 일부만 저장되는 일을 막기 위해 한 번에 하나씩 요청해 주세요.`,
+        sources: [],
+      });
     else if (confirmation) responses.push({ answer: confirmation, sources: [] });
-    else
-      for (const decision of decisions)
-        responses.push(await dispatchChatMutation(ruleFiles, decision));
+    else {
+      for (const decision of decisions) {
+        try {
+          responses.push(await dispatchChatMutation(ruleFiles, decision));
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          responses.push({
+            answer: responses.length
+              ? `앞의 ${responses.length}개 변경은 저장됐지만 다음 작업은 실패했습니다: ${detail}`
+              : `변경을 저장하지 못했습니다: ${detail}`,
+            sources: [],
+          });
+          break;
+        }
+      }
+    }
     const response = {
       answer: responses.map((item) => item.answer).filter(Boolean).join("\n"),
       sources: responses.flatMap((item) => item.sources || []).slice(0, 8),

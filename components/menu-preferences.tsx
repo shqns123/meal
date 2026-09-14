@@ -49,7 +49,12 @@ export function MenuPreferences() {
     setMessage("");
     setDrafts(current => ({...current, [draftKey(dish)]: {...current[draftKey(dish)], ...patch, name: dish.name, category: dish.category, scope}}));
   };
-  const visible = dishes.filter(dish => dish.name.includes(search.trim()) && (category === "전체" || dish.category === category) && (filter === "ALL" || preference(dish).usage === filter));
+  const visible = dishes.filter(dish =>
+    dish.name.includes(search.trim()) &&
+    (category === "전체" ? dish.category !== "부찬" : dish.category === category) &&
+    (filter === "ALL" || preference(dish).usage === filter),
+  );
+  const hasActiveFilter = Boolean(search.trim()) || category !== "전체" || filter !== "ALL";
   const save = async () => {
     setSaving(true); setError("");
     try { const notice = await savePreferences(Object.values(drafts)); setDrafts({}); await load(); setMessage(notice); }
@@ -72,12 +77,12 @@ export function MenuPreferences() {
         <label className="space-y-2 text-sm">메뉴 구분<select className={fieldClass} value={category} onChange={e => setCategory(e.target.value)}>{["전체", ...CATEGORIES].map(value => <option key={value}>{value}</option>)}</select></label>
         <label className="space-y-2 text-sm">식단 사용<select className={fieldClass} value={filter} onChange={e => setFilter(e.target.value)}><option value="ALL">전체 보기</option>{Object.entries(usageLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       </div>
-      <p className="mt-4 text-sm leading-6 text-[#615d59]">가족 전체의 허용을 기본으로 적용하되, 함께 먹는 구성원이 피하는 메뉴는 제외합니다. 익숙함만 표시하면 자동 식단 사용이 허용되지는 않아요.</p>
+      <p className="mt-4 text-sm leading-6 text-[#615d59]">가족 전체의 허용을 기본으로 적용하되, 함께 먹는 구성원이 피하는 메뉴는 제외합니다. 익숙함만 표시하면 자동 식단 사용이 허용되지는 않아요. 부찬은 메뉴 구분에서 <span className="font-medium text-[#111111]">부찬</span>을 고를 때만 표시됩니다.</p>
     </div>
     <details className="rounded-xl border border-black/10 bg-white p-4"><summary className="cursor-pointer text-sm font-medium">목록에 없는 메뉴 추가</summary><div className="mt-4 flex flex-col gap-3 sm:flex-row"><input aria-label="추가할 메뉴명" className={fieldClass} value={newName} maxLength={100} onChange={e => setNewName(e.target.value)} placeholder="메뉴명" /><select aria-label="추가할 메뉴 구분" className={fieldClass} value={newCategory} onChange={e => setNewCategory(e.target.value)}>{CATEGORIES.map(value => <option key={value}>{value}</option>)}</select><Button variant="outline" disabled={!newName.trim() || saving || loading} onClick={add}>후보 추가</Button></div></details>
     {error && <div role="alert" className="text-sm text-[#b42318]">{error}<button className="ml-3 underline" onClick={() => void load()}>다시 불러오기</button></div>}
     {message && <p role="status" className="text-sm text-[#315945]">{message}</p>}
-    {loading ? <p role="status">메뉴를 불러오는 중입니다.</p> : <MenuCandidateReview dishes={visible} saving={saving} preference={preference} edit={edit} />}
+    {loading ? <p role="status">메뉴를 불러오는 중입니다.</p> : hasActiveFilter ? <MenuCandidateReview dishes={visible} saving={saving} preference={preference} edit={edit} /> : <p className="rounded-xl border border-dashed border-black/15 bg-white px-4 py-8 text-center text-sm text-[#615d59]">위에서 메뉴 검색, 메뉴 구분 또는 식단 사용 필터를 선택하면 메뉴가 표시됩니다.</p>}
     <div className="sticky bottom-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-black/15 bg-white p-4">
       <p className="text-sm text-[#615d59]">{Object.keys(drafts).length ? `${Object.keys(drafts).length}개 변경 · 저장 후 이후 식단부터 반영` : "기존 식단은 그대로 유지됩니다."}</p>
       <Button disabled={saving || loading || !Object.keys(drafts).length} onClick={() => void save()}>{saving ? "저장 중…" : "선택한 취향 저장"}</Button>
@@ -110,5 +115,5 @@ export function MenuFeedback({name, category}: {name: string; category: string})
     catch(e) { setStatus(e instanceof Error ? e.message : "저장하지 못했습니다."); }
     finally {setBusy(false);}
   };
-  return <div className="mt-3 border-t border-black/10 pt-3"><div className="flex flex-wrap items-center gap-2"><span className="mr-auto text-sm">{name} <span className="text-xs text-[#615d59]">{usageLabels[usage]}</span></span><button type="button" disabled={busy} aria-pressed={usage === "ALLOW"} onClick={() => void save("ALLOW")} className="min-h-11 rounded-lg border border-black/20 bg-white px-3 text-xs focus-visible:ring-2 focus-visible:ring-[#0075de] disabled:opacity-50">다음에도 넣어줘</button><button type="button" disabled={busy} aria-pressed={usage === "AVOID"} onClick={() => void save("AVOID")} className="min-h-11 rounded-lg border border-black/20 bg-white px-3 text-xs focus-visible:ring-2 focus-visible:ring-[#0075de] disabled:opacity-50">앞으로 빼줘</button></div>{status && <p role="status" className="mt-2 text-xs text-[#615d59]">{status}</p>}</div>;
+  return <div className="mt-3 border-t border-black/10 pt-3"><div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><span className="text-sm">{category} · {name}</span><div className="grid grid-cols-3 gap-2" role="group" aria-label={`${name} 식단 사용`}><button type="button" disabled={busy} aria-pressed={usage === "UNKNOWN"} onClick={() => void save("UNKNOWN")} className={`min-h-11 rounded-lg border px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0075de] disabled:opacity-50 ${usage === "UNKNOWN" ? "border-[#0075de] bg-[#e6f3fe] text-[#075f9f]" : "border-black/20 bg-white hover:bg-black/[.03]"}`}>미확인</button><button type="button" disabled={busy} aria-pressed={usage === "ALLOW"} onClick={() => void save("ALLOW")} className={`min-h-11 rounded-lg border px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0075de] disabled:opacity-50 ${usage === "ALLOW" ? "border-[#32835b] bg-[#e2f3e9] text-[#315945]" : "border-black/20 bg-white hover:bg-black/[.03]"}`}>넣어도 좋아요</button><button type="button" disabled={busy} aria-pressed={usage === "AVOID"} onClick={() => void save("AVOID")} className={`min-h-11 rounded-lg border px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0075de] disabled:opacity-50 ${usage === "AVOID" ? "border-[#c14832] bg-[#ffe0db] text-[#9d2718]" : "border-black/20 bg-white hover:bg-black/[.03]"}`}>피해주세요</button></div></div>{status && <p role="status" className="mt-2 text-xs text-[#615d59]">{status}</p>}</div>;
 }

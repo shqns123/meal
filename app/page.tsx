@@ -29,7 +29,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
-import { MenuPreferences, MenuFeedback } from "@/components/menu-preferences";
+import {
+  MenuPreferences,
+  MenuFeedback,
+} from "@/components/menu-preferences";
 import { PANTRY_UNITS, PANTRY_STORAGE } from "@/lib/pantry-options";
 
 type Meal = {
@@ -70,14 +73,12 @@ type AgentRequest = {
   prompt: string;
   action:
     | "PUBLISH_WEEK"
-    | "PUBLISH_MONTH"
     | "UPDATE_DAY"
     | "REVIEW_WEEK"
     | "REGENERATE_RECIPES"
     | "REGENERATE_GROCERY";
   date?: string;
   weekStart?: string;
-  targetMonth?: string;
 };
 type MealSnapshot = {
   date: string;
@@ -450,13 +451,6 @@ export default function Home() {
               onChangeMonth={changeMonth}
               onGoToday={goToToday}
               todayScrollRequest={todayScrollRequest}
-              onGenerateMonth={() =>
-                setAgentRequest({
-                  action: "PUBLISH_MONTH",
-                  targetMonth: selectedMonth,
-                  prompt: `${formatMonth(selectedMonth)}의 월간 식단을 생성하고 검증 후 저장해줘. 레시피와 장보기는 생성하지 마.`,
-                })
-              }
               meals={mealItems}
               onOpenDay={openDay}
               onEditDay={editDay}
@@ -536,6 +530,7 @@ export default function Home() {
           close={() => setChatOpen(false)}
           onQueued={queueAgentChat}
           targetMonth={selectedMonth}
+          weekStart={selectedWeek}
           messages={chatMessages}
           setMessages={setChatMessages}
           loading={chatLoading}
@@ -809,7 +804,6 @@ function MealPlanner({
   onChangeMonth,
   onGoToday,
   todayScrollRequest,
-  onGenerateMonth,
   meals,
   onOpenDay,
   onEditDay,
@@ -821,7 +815,6 @@ function MealPlanner({
   onChangeMonth: (amount: number) => void;
   onGoToday: () => void;
   todayScrollRequest: number;
-  onGenerateMonth: () => void;
   meals: Meal[];
   onOpenDay: (date: string) => void;
   onEditDay: (date: string) => void;
@@ -829,10 +822,6 @@ function MealPlanner({
   const weekDays = buildWeekDays(weekStart);
   const periodLabel =
     view === "month" ? formatMonth(month) : formatWeekRangeLong(weekStart);
-  const monthHasMeals = meals.some((meal) => meal.date.startsWith(`${month}-`));
-  const generateMonthLabel = monthHasMeals
-    ? `${formatMonth(month)} 식단이 이미 있습니다`
-    : `${formatMonth(month)} 월간 식단 생성 테스트`;
   return (
     <>
       <PageTitle
@@ -890,7 +879,7 @@ function MealPlanner({
             )}
           </div>
           {view === "month" && (
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto">
               <Button
                 type="button"
                 variant="outline"
@@ -898,18 +887,6 @@ function MealPlanner({
                 className="h-11 px-3 lg:hidden"
               >
                 오늘
-              </Button>
-              <Button
-                type="button"
-                variant="secondary"
-                disabled={monthHasMeals}
-                onClick={onGenerateMonth}
-                className="h-11 w-11 shrink-0 px-0 sm:w-auto sm:px-3"
-                aria-label={generateMonthLabel}
-                title={generateMonthLabel}
-              >
-                <Sparkles size={16} />
-                <span className="hidden sm:inline">월간 생성 테스트</span>
               </Button>
             </div>
           )}
@@ -958,7 +935,10 @@ function MealPlanner({
     </>
   );
 }
-function MealCard({ meal, onEdit }: { meal: Meal; onEdit: () => void }) {
+function MealCard({ meal, onEdit }: {
+  meal: Meal;
+  onEdit: () => void;
+}) {
   return (
     <div
       className={`group relative mt-2 rounded-md px-2 py-1.5 text-[11px] leading-tight break-keep ${meal.color}`}
@@ -1088,12 +1068,8 @@ function MobileMealList({
             </span>
             {meal ? (
               <span className="min-w-0 flex-1">
-                <b className="block break-keep text-[15px] leading-5">
-                  {meal.main}
-                </b>
-                <span className="mt-1 block break-keep text-sm leading-5 text-black/65">
-                  {meal.sides.join(" · ")}
-                </span>
+                <b className="block break-keep text-[15px] leading-5">{meal.main}</b>
+                <span className="mt-1 block break-keep text-sm leading-5 text-black/65">{meal.sides.join(" · ")}</span>
               </span>
             ) : (
               <span className="pt-0.5 text-sm">식단 없음</span>
@@ -2139,6 +2115,7 @@ function ChatModal({
   close,
   onQueued,
   targetMonth,
+  weekStart,
   messages,
   setMessages,
   loading,
@@ -2147,6 +2124,7 @@ function ChatModal({
   close: () => void;
   onQueued: (chat: PendingAgentChat) => void;
   targetMonth: string;
+  weekStart: string;
   messages: ChatMessage[];
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
   loading: boolean;
@@ -2179,6 +2157,7 @@ function ChatModal({
         body: JSON.stringify({
           message: content,
           targetMonth,
+          weekStart,
           conversation: messages.slice(-8),
         }),
       });
@@ -2188,7 +2167,7 @@ function ChatModal({
           data.message ?? data.error ?? "AI가 답변을 처리하지 못했습니다.",
         );
       onQueued({ id: data.id });
-      const deadline = Date.now() + 10 * 60_000;
+      const deadline = Date.now() + 20 * 60_000;
       let result: {
         status?: string;
         answer?: string;
@@ -2227,7 +2206,7 @@ function ChatModal({
             role: "assistant",
             content:
               result?.error ??
-              "AI가 아직 답변을 마치지 못했습니다. 잠시 후 다시 질문해 주세요.",
+              "AI가 백그라운드에서 계속 처리 중입니다. 같은 요청을 다시 보내지 말고 완료 알림을 기다려 주세요.",
           },
         ]);
     } catch (error) {
@@ -2384,11 +2363,8 @@ function AgentModal({
   const [beforeSnapshot, setBeforeSnapshot] = useState<MealSnapshot | null>(
     null,
   );
-  const isMonthRequest = request.action === "PUBLISH_MONTH";
   const description =
-    isMonthRequest
-      ? `${formatMonth(request.targetMonth!)} 식단만 생성합니다. 레시피와 장보기는 생성하지 않습니다.`
-      : request.action === "UPDATE_DAY"
+    request.action === "UPDATE_DAY"
       ? `${request.date} 식단과 그 날짜의 레시피·장보기만 수정합니다.`
       : request.action === "REGENERATE_RECIPES"
         ? "선택한 주차의 메뉴는 유지하고 레시피만 새로 만듭니다."
@@ -2409,7 +2385,6 @@ function AgentModal({
           action: request.action,
           date: request.date,
           weekStart: request.weekStart ?? sundayFor(request.date),
-          targetMonth: request.targetMonth,
           days: request.action === "UPDATE_DAY" ? 1 : 7,
         }),
       });
@@ -2509,10 +2484,9 @@ function AgentModal({
           id="agent-dialog-title"
           className="mt-5 text-2xl font-semibold tracking-tight"
         >
-          {isMonthRequest ? "월간 식단 생성 테스트" : "AI에게 식단 검토 요청"}
+          AI에게 식단 검토 요청
         </h2>
         <p className="mt-2 text-sm leading-5 text-black/60">{description}</p>
-        {isMonthRequest && <p className="mt-3 text-sm leading-6 text-[#615d59]">먼저 ‘우리 집 메뉴’에서 주찬·부찬·주말 점심 후보의 식단 사용을 확인해 주세요. 미확인 메뉴는 자동으로 넣지 않습니다.</p>}
         <label
           className="mt-5 block text-sm font-medium"
           htmlFor="agent-request-prompt"
@@ -2540,9 +2514,7 @@ function AgentModal({
             ? "요청을 전달하고 있어요..."
             : requestId
               ? "백그라운드에서 처리 중"
-              : isMonthRequest
-                ? "월간 식단 생성하기"
-                : "검토 요청하기"}
+              : "검토 요청하기"}
         </Button>
         {message && (
           <div

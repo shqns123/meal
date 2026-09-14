@@ -25,6 +25,7 @@ if (
     "publish-recipes",
     "validate-day",
     "publish-day",
+    "publish-days",
     "rebuild-shopping",
     "delete-recipe",
     "manage-grocery",
@@ -69,6 +70,7 @@ function usage() {
   node scripts/mealctl.mjs publish-recipes --input /path/week.json --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs validate-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD
   node scripts/mealctl.mjs publish-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD [--request-id ID]
+  node scripts/mealctl.mjs publish-days --input /path/days.json
   node scripts/mealctl.mjs rebuild-shopping --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs delete-recipe --week YYYY-MM-DD [--title "recipe title" | --all true] [--category CATEGORY] [--date YYYY-MM-DD]
   node scripts/mealctl.mjs manage-grocery --week YYYY-MM-DD --input /path/action.json
@@ -1329,7 +1331,7 @@ function publishDay(payload, weekStart, date, requestId = null) {
       .prepare(
         'SELECT "id","plannedDates" FROM "Recipe" WHERE "weekKeys" LIKE ? AND "plannedDates" LIKE ?',
       )
-      .all(`%${weekStart}%`, `%${date}%`);
+      .all(`%${weekStart}%`, `%"${date}"%`);
     const unlink = db.prepare(
       'UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=? AND "date"=?',
     );
@@ -1599,6 +1601,105 @@ function manageGroceryForChat(payload, weekStart) {
   }
 }
 
+const pantryUnits = new Set(["g", "kg", "ml", "L", "개", "팩", "봉", "병", "캔", "모", "단", "통", "장", "마리"]);
+const pantryStorage = new Set(["냉장", "냉동", "실온", "기타"]);
+
+function convertPantryQuantity(quantity, fromUnit, toUnit) {
+  if (fromUnit === toUnit) return quantity;
+  const scale = { g: 1, kg: 1000, ml: 1, L: 1000 };
+  const sameKind =
+    ["g", "kg"].includes(fromUnit) && ["g", "kg"].includes(toUnit) ||
+    ["ml", "L"].includes(fromUnit) && ["ml", "L"].includes(toUnit);
+  if (!sameKind)
+    fail(`보유 재료 단위를 ${fromUnit}에서 ${toUnit}(으)로 환산할 수 없습니다.`);
+  return quantity * scale[fromUnit] / scale[toUnit];
+}
+
+function publishDays(payload) {
+  const changes = Array.isArray(payload?.mealChanges) ? payload.mealChanges : [];
+  if (!changes.length || changes.length > 31)
+    fail("한 번에 변경할 식단은 1~31일이어야 합니다.");
+  const dates = changes.map((change) => String(change?.date ?? ""));
+  if (new Set(dates).size !== dates.length)
+    fail("변경할 날짜가 중복되었습니다.");
+  const errors = [];
+  const warnings = [];
+  for (const change of changes) {
+    const date = String(change?.date ?? "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      errors.push(`올바르지 않은 날짜: ${date || "(비어 있음)"}`);
+      continue;
+    }
+    const weekStart = sundayFor(date);
+    const dayPayload = {
+      schemaVersion: "meal-week.v1",
+      weekStart,
+      changeReason: payload.changeReason,
+      mealChanges: [change],
+      recipes: [],
+    };
+    const validation = validateDay(dayPayload, weekStart, date);
+    errors.push(...validation.errors);
+    warnings.push(...validation.warnings);
+  }
+  if (errors.length) {
+    printJson({ valid: false, errors, warnings });
+    process.exitCode = 2;
+    return;
+  }
+  const backupPath = backupDatabase("meal-days");
+  const now = Date.now();
+  const affectedWeeks = [...new Set(dates.map(sundayFor))];
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    const findPlan = db.prepare(
+      'SELECT "id","lunchPlan","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?',
+    );
+    const updatePlan = db.prepare(
+      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=NULL,"updatedAt"=? WHERE "id"=?',
+    );
+    const findRecipes = db.prepare(
+      'SELECT "id","plannedDates" FROM "Recipe" WHERE "weekKeys" LIKE ? AND "plannedDates" LIKE ?',
+    );
+    const unlink = db.prepare(
+      'UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=? AND "date"=?',
+    );
+    const trimDates = db.prepare(
+      'UPDATE "Recipe" SET "plannedDates"=?,"updatedAt"=? WHERE "id"=?',
+    );
+    const deleteRecipe = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
+    for (const change of changes) {
+      const date = String(change.date);
+      const current = findPlan.get(toMillis(date));
+      if (!current) throw new Error(`${date}에 저장된 식단이 없습니다.`);
+      updatePlan.run(
+        Object.hasOwn(change, "lunch") ? (change.lunch ?? null) : current.lunchPlan,
+        change.main,
+        JSON.stringify(change.sides),
+        Object.hasOwn(change, "baby") ? (change.baby ?? null) : current.babyMenu,
+        Object.hasOwn(change, "note") ? (change.note ?? null) : current.cookingNote,
+        String(payload.changeReason || "AI 채팅에서 식단을 변경했습니다.").slice(0, 2000),
+        now,
+        current.id,
+      );
+      const weekStart = sundayFor(date);
+      for (const recipe of findRecipes.all(`%${weekStart}%`, `%"${date}"%`)) {
+        const plannedDates = parseJsonList(recipe.plannedDates).filter((value) => value !== date);
+        unlink.run(recipe.id, toMillis(date));
+        if (plannedDates.length) trimDates.run(JSON.stringify(plannedDates), now, recipe.id);
+        else deleteRecipe.run(recipe.id);
+      }
+    }
+    for (const weekStart of affectedWeeks)
+      writeShopping(weekStart, storedRecipes(weekStart, { skipInvalid: true }), now);
+    db.exec("COMMIT");
+    printJson({ success: true, mealChanges: changes.length, affectedWeeks, backup: backupPath, warnings });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+}
+
 function managePantryForChat(payload) {
   const operation = String(payload?.operation ?? "upsert");
   const name = String(payload?.name ?? "").trim();
@@ -1613,18 +1714,31 @@ function managePantryForChat(payload) {
   const requested = operation === "delete" ? null : Number(payload?.quantity);
   if (operation !== "delete" && !Number.isFinite(requested))
     fail("보유 재료 수량은 숫자여야 합니다.");
+  const requestedUnit = operation === "delete"
+    ? null
+    : String(payload?.unit ?? current?.unit ?? "").trim();
+  if (requestedUnit !== null && !pantryUnits.has(requestedUnit))
+    fail("보유 재료 단위를 목록에서 선택해 주세요.");
+  const unit = operation === "delete"
+    ? null
+    : operation === "adjust" && current
+      ? current.unit
+      : requestedUnit;
+  const adjustedAmount = operation === "adjust"
+    ? convertPantryQuantity(requested, requestedUnit, current.unit)
+    : requested;
   const quantity = operation === "delete"
     ? null
     : operation === "adjust"
-      ? Number(current.quantity) + requested
-      : requested;
+      ? Number(current.quantity) + adjustedAmount
+      : adjustedAmount;
   if (quantity !== null && (quantity < 0 || quantity > 1_000_000))
     fail("보유 재료 수량은 0 이상 1,000,000 이하여야 합니다.");
-  const unit = operation === "delete"
+  const category = operation === "delete"
     ? null
-    : String(payload?.unit ?? current?.unit ?? "").trim();
-  if (unit !== null && (!unit || unit.length > 12))
-    fail("보유 재료 단위가 필요합니다.");
+    : String(payload?.category ?? current?.category ?? "기타").trim();
+  if (category !== null && !pantryStorage.has(category))
+    fail("보유 위치는 냉장, 냉동, 실온, 기타 중에서 선택해 주세요.");
   const expiresAt = operation === "delete"
     ? null
     : payload?.expiresAt
@@ -1650,7 +1764,7 @@ function managePantryForChat(payload) {
         name,
         quantity,
         unit,
-        String(payload?.category ?? current?.category ?? "기타").trim().slice(0, 40) || "기타",
+        category,
         expiresAt,
         now,
       );
@@ -1992,6 +2106,7 @@ try {
       flags.date,
       flags["request-id"],
     );
+  if (command === "publish-days") publishDays(readPayload(flags.input));
   if (command === "rebuild-shopping")
     rebuildShopping(requireWeek(flags.week), flags["request-id"]);
   if (command === "delete-recipe")
