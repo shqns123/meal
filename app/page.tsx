@@ -199,11 +199,6 @@ export default function Home() {
   }, [dataWeek, selectedMonth, refreshVersion]);
 
   useEffect(() => {
-    if (window.isSecureContext && "serviceWorker" in navigator)
-      void navigator.serviceWorker.register("/push-worker.js").catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) ?? "[]");
       if (Array.isArray(parsed)) {
@@ -541,7 +536,7 @@ export default function Home() {
       )}
       <AgentCompletionMonitor jobs={pendingJobs} onFinished={finishAgentJob} />
       <AgentChatCompletionMonitor chats={pendingChats} onFinished={finishAgentChat} />
-      <NotificationPermissionPrompt />
+      <NotificationPermissionPrompt onNotice={setAppNotice} />
       {appNotice && <InAppNotice message={appNotice} close={() => setAppNotice(null)} />}
     </main>
   );
@@ -597,30 +592,59 @@ function AgentChatCompletionMonitor({ chats, onFinished }: { chats: PendingAgent
   return null;
 }
 
-function NotificationPermissionPrompt() {
+function NotificationPermissionPrompt({
+  onNotice,
+}: {
+  onNotice: (message: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   useEffect(() => {
-    if (localStorage.getItem("meal-push-choice") || !window.isSecureContext || !("Notification" in window) || Notification.permission !== "default") return;
-    fetch("/api/push/config").then((response) => response.ok ? response.json() : null).then((data) => setOpen(Boolean(data?.configured && data.publicKey))).catch(() => undefined);
-  }, []);
+    let cancelled = false;
+    localStorage.removeItem("meal-push-choice");
+    if (!pushSupported()) return;
+    const prepare = async () => {
+      try {
+        const publicKey = await loadPushPublicKey();
+        if (Notification.permission === "granted") {
+          await syncPushSubscription(publicKey);
+          return;
+        }
+        if (
+          Notification.permission === "default" &&
+          sessionStorage.getItem("meal-push-dismissed") !== "true" &&
+          !cancelled
+        ) setOpen(true);
+      } catch (error) {
+        if (!cancelled && Notification.permission === "granted")
+          onNotice(pushErrorMessage(error));
+      }
+    };
+    void prepare();
+    return () => { cancelled = true; };
+  }, [onNotice]);
   const subscribe = async () => {
     setBusy(true); setMessage("");
     try {
       const permission = await Notification.requestPermission();
-      if (permission !== "granted") { localStorage.setItem("meal-push-choice", "denied"); setOpen(false); return; }
-      const config = await fetch("/api/push/config").then((response) => { if (!response.ok) throw new Error("알림 설정을 불러오지 못했습니다."); return response.json() as Promise<{ publicKey: string }>; });
-      const registration = await navigator.serviceWorker.register("/push-worker.js");
-      const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(config.publicKey) });
-      const response = await fetch("/api/push/subscription", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(subscription) });
-      if (!response.ok) throw new Error("알림 수신 등록에 실패했습니다.");
-      localStorage.setItem("meal-push-choice", "granted"); setOpen(false);
-    } catch (error) { setMessage(error instanceof Error ? error.message : "알림 수신 등록에 실패했습니다."); }
+      if (permission !== "granted") {
+        sessionStorage.setItem("meal-push-dismissed", "true");
+        setOpen(false);
+        if (permission === "denied")
+          onNotice("알림이 차단되어 있습니다. 브라우저 사이트 설정에서 알림을 허용할 수 있어요.");
+        return;
+      }
+      const publicKey = await loadPushPublicKey();
+      await syncPushSubscription(publicKey);
+      sessionStorage.removeItem("meal-push-dismissed");
+      setOpen(false);
+      onNotice("이 기기에서 AI 작업 완료 알림을 받을 수 있습니다.");
+    } catch (error) { setMessage(pushErrorMessage(error)); }
     finally { setBusy(false); }
   };
   if (!open) return null;
-  const dismiss = () => { localStorage.setItem("meal-push-choice", "later"); setOpen(false); };
+  const dismiss = () => { sessionStorage.setItem("meal-push-dismissed", "true"); setOpen(false); };
   return (
     <Dialog onClose={dismiss} labelledBy="push-permission-title" className="max-w-md">
       <CardContent className="p-6">
@@ -645,6 +669,61 @@ function urlBase64ToUint8Array(value: string) {
   const padded = `${value}${"=".repeat((4 - (value.length % 4)) % 4)}`.replace(/-/g, "+").replace(/_/g, "/");
   const raw = window.atob(padded);
   return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+}
+
+function pushSupported() {
+  return window.isSecureContext &&
+    "Notification" in window &&
+    "serviceWorker" in navigator &&
+    "PushManager" in window;
+}
+
+async function loadPushPublicKey() {
+  const response = await fetch("/api/push/config", { cache: "no-store" });
+  const data = await response.json().catch(() => null) as {
+    publicKey?: string;
+    message?: string;
+  } | null;
+  if (!response.ok || !data?.publicKey)
+    throw new Error(data?.message || "알림 서버 설정을 확인하지 못했습니다.");
+  return data.publicKey;
+}
+
+async function syncPushSubscription(publicKey: string) {
+  const registration = await navigator.serviceWorker.register("/push-worker.js");
+  await navigator.serviceWorker.ready;
+  const applicationServerKey = urlBase64ToUint8Array(publicKey);
+  let subscription = await registration.pushManager.getSubscription();
+  const currentKey = subscription?.options.applicationServerKey
+    ? new Uint8Array(subscription.options.applicationServerKey)
+    : null;
+  if (subscription && (!currentKey || !sameBytes(currentKey, applicationServerKey))) {
+    await subscription.unsubscribe();
+    subscription = null;
+  }
+  subscription ??= await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey,
+  });
+  const response = await fetch("/api/push/subscription", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(subscription),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => null) as { error?: string } | null;
+    throw new Error(data?.error || "이 기기의 알림 수신 등록에 실패했습니다.");
+  }
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array) {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+function pushErrorMessage(error: unknown) {
+  return error instanceof Error
+    ? `알림을 준비하지 못했습니다. ${error.message}`
+    : "알림을 준비하지 못했습니다. 잠시 후 다시 접속해 주세요.";
 }
 
 function PageTitle({

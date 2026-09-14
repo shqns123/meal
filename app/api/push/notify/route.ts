@@ -23,7 +23,10 @@ export async function POST(request: Request) {
   if (!authorized(request))
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (!hasWebPushConfig())
-    return NextResponse.json({ skipped: true, reason: "push-not-configured" });
+    return NextResponse.json(
+      { delivered: false, reason: "push-not-configured" },
+      { status: 503 },
+    );
 
   let body: NotifyBody;
   try {
@@ -37,7 +40,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "One valid request ID is required." }, { status: 400 });
 
   let message: string;
-  let claimed = 0;
+  let target: { kind: "job" | "chat"; id: string };
   if (requestId) {
     const job = await prisma.agentJob.findFirst({
       where: { requestId },
@@ -47,12 +50,7 @@ export async function POST(request: Request) {
     if (!job || job.status !== "COMPLETED")
       return NextResponse.json({ error: "Completed job was not found." }, { status: 404 });
     if (job.notifiedAt) return NextResponse.json({ delivered: false, duplicate: true });
-    claimed = (
-      await prisma.agentJob.updateMany({
-        where: { id: job.id, notifiedAt: null, status: "COMPLETED" },
-        data: { notifiedAt: new Date() },
-      })
-    ).count;
+    target = { kind: "job", id: job.id };
     message = `${actionLabels[job.action] ?? "AI 작업"}이 완료되었습니다.`;
   } else {
     const chat = await prisma.agentChat.findUnique({
@@ -62,20 +60,36 @@ export async function POST(request: Request) {
     if (!chat || chat.status !== "COMPLETED")
       return NextResponse.json({ error: "Completed chat was not found." }, { status: 404 });
     if (chat.notifiedAt) return NextResponse.json({ delivered: false, duplicate: true });
-    claimed = (
-      await prisma.agentChat.updateMany({
-        where: { id: chat.id, notifiedAt: null, status: "COMPLETED" },
-        data: { notifiedAt: new Date() },
-      })
-    ).count;
+    target = { kind: "chat", id: chat.id };
     message = "AI 답변이 도착했습니다.";
   }
-  if (!claimed) return NextResponse.json({ delivered: false, duplicate: true });
 
   const subscriptions = await prisma.pushSubscription.findMany();
+  if (!subscriptions.length)
+    return NextResponse.json(
+      { delivered: false, reason: "no-subscriptions" },
+      { status: 503 },
+    );
+
+  const claimedAt = new Date();
+  const claimed = target.kind === "job"
+    ? (
+        await prisma.agentJob.updateMany({
+          where: { id: target.id, notifiedAt: null, status: "COMPLETED" },
+          data: { notifiedAt: claimedAt },
+        })
+      ).count
+    : (
+        await prisma.agentChat.updateMany({
+          where: { id: target.id, notifiedAt: null, status: "COMPLETED" },
+          data: { notifiedAt: claimedAt },
+        })
+      ).count;
+  if (!claimed) return NextResponse.json({ delivered: false, duplicate: true });
+
   const results = await Promise.allSettled(
     subscriptions.map((subscription) =>
-      sendWebPush(subscription, {
+      sendWithRetry(subscription, {
         title: "우리집 식탁",
         body: message,
         url: "/",
@@ -91,7 +105,49 @@ export async function POST(request: Request) {
     .map((subscription) => subscription.endpoint);
   if (expired.length)
     await prisma.pushSubscription.deleteMany({ where: { endpoint: { in: expired } } });
-  return NextResponse.json({ delivered: true, subscriptions: subscriptions.length, expired: expired.length });
+  const delivered = results.filter((result) => result.status === "fulfilled").length;
+  const failed = results.length - delivered;
+  if (!delivered) {
+    if (target.kind === "job")
+      await prisma.agentJob.updateMany({
+        where: { id: target.id, notifiedAt: claimedAt },
+        data: { notifiedAt: null },
+      });
+    else
+      await prisma.agentChat.updateMany({
+        where: { id: target.id, notifiedAt: claimedAt },
+        data: { notifiedAt: null },
+      });
+    return NextResponse.json(
+      { delivered: false, subscriptions: subscriptions.length, failed, expired: expired.length },
+      { status: 502 },
+    );
+  }
+  return NextResponse.json({
+    delivered: true,
+    subscriptions: subscriptions.length,
+    deliveredSubscriptions: delivered,
+    failed,
+    expired: expired.length,
+  });
+}
+
+async function sendWithRetry(
+  subscription: { endpoint: string; p256dh: string; auth: string },
+  payload: object,
+) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await sendWebPush(subscription, payload);
+    } catch (error) {
+      lastError = error;
+      const statusCode = Number((error as { statusCode?: number }).statusCode);
+      if ([404, 410].includes(statusCode) || attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt));
+    }
+  }
+  throw lastError;
 }
 
 function authorized(request: Request) {
