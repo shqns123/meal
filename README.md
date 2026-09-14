@@ -37,3 +37,14 @@ docker compose exec app npx prisma db push
 모든 SQLite 변경은 모델이 직접 하지 않고 앱의 `mealctl` 검증·게시 절차를 통과한 경우에만 반영됩니다. 따라서 이 앱 동작에 Hermes 컨테이너, 웹훅 route, Docker 소켓, Hermes 마운트는 필요하지 않습니다.
 
 환경 변수와 처리 범위는 [OpenRouter 연결 안내](docs/OPENROUTER.md)를 참고하세요.
+
+## 메뉴 취향 관리
+
+- `우리 집 메뉴`에서 식단 사용 여부와 익숙함을 각각 선택한 뒤 저장합니다. 기존 식단·레시피는 미확인 후보로만 표시합니다.
+- 가족 전체·구성원별로 설정할 수 있습니다. 가족 전체 허용보다 함께 먹는 구성원의 기피가 우선합니다.
+- 날짜 상세의 `이 메뉴, 다음에도 먹을까요?`에서 가족 전체의 지속 취향을 저장합니다. 기존 식단은 자동 변경하지 않습니다.
+- 이번 주만의 요청은 주간 점검에 기록합니다. 단위·보관 위치는 드롭다운으로 선택하고 기존 사용자 지정 값은 그대로 표시합니다.
+- 새로운 월 생성 전에 주찬·부찬·주말 점심 후보를 확인하세요. 미확인 메뉴는 새로 편성하지 않고, 확인된 메뉴의 반복은 허용합니다.
+- 스키마 변경 적용: DB 백업 후 `npx prisma db push`, `npx prisma generate`. 추가 테이블은 `Dish`, `DishPreference`이며 기존 식단은 이관·수정하지 않습니다.
+- 검증: `node scripts/test-menu-preferences.mjs`, `npx prisma validate`, `npm run lint`, `npm run build`.
+- 실행 중인 개발 서버와 빌드 산출물이 충돌하면 PowerShell에서 `$env:NEXT_BUILD_DIR='.next-preview'`를 설정한 뒤 빌드합니다. 기본 출력 위치는 기존 `.next`입니다.

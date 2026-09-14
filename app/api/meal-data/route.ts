@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { missingRecipeCoverage } from "@/lib/recipe-coverage.mjs";
 
 export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
@@ -27,6 +28,7 @@ export async function GET(request: Request) {
   ]);
 
   return NextResponse.json({
+    groceryMissingRecipes: missingRecipeCoverage(mealPlans.filter(meal => meal.date >= weekStart && meal.date < weekEnd), recipes),
     meals: mealPlans.map((meal, index) => ({
       date: formatKst(meal.date),
       day: Number(

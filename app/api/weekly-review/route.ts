@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { PANTRY_UNITS, PANTRY_STORAGE } from "@/lib/pantry-options";
 
 type PantryDraft = {
   name?: string;
@@ -24,7 +25,8 @@ function addDays(date: string, days: number) {
 function validDate(value?: string) {
   return (
     /^\d{4}-\d{2}-\d{2}$/.test(value ?? "") &&
-    !Number.isNaN(new Date(`${value}T00:00:00Z`).valueOf())
+    !Number.isNaN(new Date(`${value}T00:00:00Z`).valueOf()) &&
+    new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value
   );
 }
 function sundayFor(date: string) {
@@ -105,12 +107,18 @@ export async function POST(request: Request) {
     );
   const referenceDate = body.referenceDate!;
   const weekStart = sundayFor(referenceDate);
-  const pantry = (body.pantry ?? []).filter((item) => item.name?.trim());
+  if (body.pantry !== undefined && !Array.isArray(body.pantry))
+    return NextResponse.json({error: "재료 목록 형식이 올바르지 않습니다."}, {status: 400});
+  const pantry = (body.pantry ?? []).filter((item) => typeof item?.name === "string" && item.name.trim());
+  const existingPantry = await prisma.pantryItem.findMany();
   if (
-    pantry.some((item) => !item.unit?.trim() || !(Number(item.quantity) >= 0))
+    pantry.some((item) => typeof item.unit !== "string" || !item.unit.trim() || !Number.isFinite(Number(item.quantity)) || !(Number(item.quantity) >= 0) ||
+      (item.expiresAt && !validDate(item.expiresAt)) ||
+      (!PANTRY_UNITS.includes(item.unit) && !existingPantry.some(old => old.name === item.name?.trim() && old.unit === item.unit)) ||
+      (!PANTRY_STORAGE.includes(item.category ?? "") && !existingPantry.some(old => old.name === item.name?.trim() && old.category === item.category)))
   )
     return NextResponse.json(
-      { error: "Each pantry item needs a name, quantity, and unit" },
+      { error: "재료의 수량·단위·보관 위치·날짜를 확인해 주세요. 수량은 0 이상의 숫자여야 합니다." },
       { status: 400 },
     );
   await prisma.$transaction(async (tx) => {

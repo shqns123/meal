@@ -29,6 +29,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
+import { MenuPreferences, MenuFeedback } from "@/components/menu-preferences";
+import { PANTRY_UNITS, PANTRY_STORAGE } from "@/lib/pantry-options";
 
 type Meal = {
   date: string;
@@ -132,6 +134,7 @@ const nav = [
   [CalendarDays, "이 달의 식단"],
   [BookOpen, "레시피"],
   [ShoppingBasket, "장보기"],
+  [UtensilsCrossed, "우리 집 메뉴"],
 ] as const;
 const seedMeals: Meal[] = [];
 const seedRecipes: Recipe[] = [];
@@ -155,6 +158,7 @@ export default function Home() {
   const [mealItems, setMealItems] = useState(seedMeals);
   const [recipes, setRecipes] = useState(seedRecipes);
   const [grocery, setGrocery] = useState(seedGrocery);
+  const [groceryMissingRecipes, setGroceryMissingRecipes] = useState<string[]>([]);
   const [selectedMonth, setSelectedMonth] = useState(() =>
     currentKstDate().slice(0, 7),
   );
@@ -186,11 +190,13 @@ export default function Home() {
           setMealItems(data.meals ?? []);
           setRecipes(data.recipes ?? []);
           setGrocery(data.grocery ?? []);
+          setGroceryMissingRecipes(data.groceryMissingRecipes ?? []);
         })
         .catch(() => {
           setMealItems([]);
           setRecipes([]);
           setGrocery([]);
+          setGroceryMissingRecipes([]);
         });
     load();
     const onFocus = () => load();
@@ -472,6 +478,7 @@ export default function Home() {
           {active === "장보기" && (
             <GroceryList
               grocery={grocery}
+              missingRecipes={groceryMissingRecipes}
               setGrocery={setGrocery}
               weekStart={selectedWeek}
               onChangeWeek={changeWeek}
@@ -485,6 +492,7 @@ export default function Home() {
               }
             />
           )}
+          {active === "우리 집 메뉴" && <MenuPreferences />}
           {active === "주간 점검" && (
             <WeeklyReviewSettings
               onRequest={(request) =>
@@ -1385,6 +1393,7 @@ function RecipeModal({ recipe, close }: { recipe: Recipe; close: () => void }) {
 }
 function GroceryList({
   grocery,
+  missingRecipes,
   setGrocery,
   weekStart,
   onChangeWeek,
@@ -1392,6 +1401,7 @@ function GroceryList({
   onRegenerate,
 }: {
   grocery: Grocery[];
+  missingRecipes: string[];
   setGrocery: React.Dispatch<React.SetStateAction<Grocery[]>>;
   weekStart: string;
   onChangeWeek: (amount: number) => void;
@@ -1479,6 +1489,7 @@ function GroceryList({
   );
   return (
     <>
+      {missingRecipes.length > 0 && <div role="status" className="mb-5 rounded-xl border border-[#9a6500]/25 bg-[#fff0d4] p-4 text-sm text-[#644100]"><p className="font-medium">장보기 계산 미완료 · 확인된 레시피가 부족해요</p><p className="mt-2">아래 메뉴의 재료가 빠질 수 있습니다. 기존 장보기 목록을 확인하고 레시피를 보충한 뒤 다시 계산해 주세요.</p><details className="mt-3"><summary className="cursor-pointer">누락 메뉴 {missingRecipes.length}개 보기</summary><ul className="mt-2 list-disc space-y-1 pl-5">{missingRecipes.map(item => <li key={item}>{item}</li>)}</ul></details></div>}
       <PageTitle
         label={`${formatWeekRange(weekStart)} 필요한 재료`}
         title="장보기"
@@ -1713,7 +1724,7 @@ function WeeklyReviewSettings({
           </div>
           <div className="mt-6 grid gap-4 sm:grid-cols-2">
             <label className="text-sm font-medium">
-              먹고 싶은 메뉴
+              먹고 싶은 메뉴 · 이번 주만 적용
               <textarea
                 value={wantedFoods}
                 onChange={(event) => setWantedFoods(event.target.value)}
@@ -1722,7 +1733,7 @@ function WeeklyReviewSettings({
               />
             </label>
             <label className="text-sm font-medium">
-              피하고 싶은 메뉴
+              피하고 싶은 메뉴 · 이번 주만 적용
               <textarea
                 value={avoidFoods}
                 onChange={(event) => setAvoidFoods(event.target.value)}
@@ -1777,7 +1788,7 @@ function WeeklyReviewSettings({
               pantry.map((item, index) => (
                 <div
                   key={index}
-                  className="grid gap-2 rounded-xl bg-[#f6f5f4] p-3 sm:grid-cols-[1.5fr_.7fr_.7fr_1fr_1.2fr_auto]"
+                  className="grid items-end gap-2 rounded-xl bg-[#f6f5f4] p-3 sm:grid-cols-[1.5fr_.7fr_.7fr_1fr_1.2fr_auto]"
                 >
                   <input
                     value={item.name}
@@ -1795,24 +1806,26 @@ function WeeklyReviewSettings({
                     className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm"
                     type="number"
                     min="0"
+                    step="any"
+                    aria-label={`${item.name || "재료"} 수량`}
                     placeholder="수량"
                   />
-                  <input
-                    value={item.unit}
-                    onChange={(event) =>
-                      updatePantry(index, "unit", event.target.value)
-                    }
-                    className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm"
-                    placeholder="단위"
-                  />
-                  <input
-                    value={item.category}
-                    onChange={(event) =>
-                      updatePantry(index, "category", event.target.value)
-                    }
-                    className="h-9 rounded-lg border border-black/[.1] bg-white px-2 text-sm"
-                    placeholder="보관"
-                  />
+                  <label className="text-xs text-[#615d59]">단위
+                    <select aria-label={`${item.name || "재료"} 단위`} value={item.unit}
+                      onChange={(event) => updatePantry(index, "unit", event.target.value)}
+                      className="mt-1 h-11 w-full rounded-lg border border-black/20 bg-white px-2 text-sm text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#0075de]">
+                      {!PANTRY_UNITS.includes(item.unit) && <option value={item.unit}>{item.unit || "선택해 주세요"}{item.unit ? " (기존 값)" : ""}</option>}
+                      {PANTRY_UNITS.map(value => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                  </label>
+                  <label className="text-xs text-[#615d59]">보관 위치
+                    <select aria-label={`${item.name || "재료"} 보관 위치`} value={item.category}
+                      onChange={(event) => updatePantry(index, "category", event.target.value)}
+                      className="mt-1 h-11 w-full rounded-lg border border-black/20 bg-white px-2 text-sm text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#0075de]">
+                      {!PANTRY_STORAGE.includes(item.category) && <option value={item.category}>{item.category || "선택해 주세요"}{item.category ? " (기존 값)" : ""}</option>}
+                      {PANTRY_STORAGE.map(value => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                  </label>
                   <input
                     value={item.expiresAt}
                     onChange={(event) =>
@@ -1996,6 +2009,11 @@ function DayDetailModal({
                   {detail.meal.baby && (
                     <p className="text-black/70">아기 · {detail.meal.baby}</p>
                   )}
+                  <details className="pt-3"><summary className="cursor-pointer text-sm text-[#615d59]">이 메뉴, 다음에도 먹을까요?</summary>
+                    <p className="mt-2 text-xs text-[#615d59]">가족 전체의 앞으로의 취향에 적용해요. 이번 주만 피하려면 주간 점검에 적어주세요.</p>
+                    {detail.meal.main && <MenuFeedback key={`주찬|${detail.meal.main}`} name={detail.meal.main} category="주찬" />}
+                    {detail.meal.sides.map(side => <MenuFeedback key={`부찬|${side}`} name={side} category="부찬" />)}
+                  </details>
                   {detail.meal.note && (
                     <p className="pt-1 text-xs text-black/55">
                       메모 · {detail.meal.note}
@@ -2494,6 +2512,7 @@ function AgentModal({
           {isMonthRequest ? "월간 식단 생성 테스트" : "AI에게 식단 검토 요청"}
         </h2>
         <p className="mt-2 text-sm leading-5 text-black/60">{description}</p>
+        {isMonthRequest && <p className="mt-3 text-sm leading-6 text-[#615d59]">먼저 ‘우리 집 메뉴’에서 주찬·부찬·주말 점심 후보의 식단 사용을 확인해 주세요. 미확인 메뉴는 자동으로 넣지 않습니다.</p>}
         <label
           className="mt-5 block text-sm font-medium"
           htmlFor="agent-request-prompt"

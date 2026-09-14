@@ -22,6 +22,32 @@ model FamilyMember {
   schedules       FamilySchedule[]
 }
 
+model Dish {
+  id          String           @id @default(cuid())
+  name        String
+  category    String
+  aliases     String           @default("[]")
+  preferences DishPreference[]
+  createdAt   DateTime         @default(now())
+
+  @@unique([name, category])
+}
+
+model DishPreference {
+  id           String   @id @default(cuid())
+  dishId       String
+  dish         Dish     @relation(fields: [dishId], references: [id], onDelete: Cascade)
+  scope        String   @default("family")
+  usage        String   @default("UNKNOWN")
+  familiarity  String   @default("UNKNOWN")
+  note         String   @default("")
+  source       String
+  confirmedAt  DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([dishId, scope])
+}
+
 model Recipe {
   id             String       @id @default(cuid())
   title          String

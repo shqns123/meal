@@ -4,6 +4,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { preferenceContext, savePreference, validateMealPreferences } from "./dish-preferences.mjs";
+import { missingRecipeCoverage } from "../lib/recipe-coverage.mjs";
 
 const root = process.env.MEAL_PLAN_ROOT ?? process.cwd();
 const dbPath =
@@ -28,6 +30,7 @@ if (
     "manage-grocery",
     "manage-pantry",
     "manage-family",
+    "manage-preference",
     "manage-review",
     "update-attendance",
     "reply-chat",
@@ -71,6 +74,7 @@ function usage() {
   node scripts/mealctl.mjs manage-grocery --week YYYY-MM-DD --input /path/action.json
   node scripts/mealctl.mjs manage-pantry --input /path/action.json
   node scripts/mealctl.mjs manage-family --input /path/action.json
+  node scripts/mealctl.mjs manage-preference --input /path/action.json
   node scripts/mealctl.mjs manage-review --week YYYY-MM-DD --input /path/action.json
   node scripts/mealctl.mjs update-attendance --date YYYY-MM-DD --input /path/action.json
   node scripts/mealctl.mjs reply-chat --id REQUEST_ID --input /path/chat-response.json
@@ -282,6 +286,7 @@ function loadContext(weekStart) {
     .all(startMs);
   return {
     schemaVersion: "meal-week.v1",
+    dishPreferences: preferenceContext(db),
     weekStart,
     weekEnd,
     timezone: "Asia/Seoul",
@@ -380,6 +385,8 @@ function loadMonthContext(month) {
   const schedules = db.prepare('SELECT s."date",s."isWorking",s."eatsAtCompany",s."isAway",s."lunchNotAtHome",s."dinnerNotAtHome",s."note",m."name" AS "memberName",m."role" AS "memberRole" FROM "FamilySchedule" s JOIN "FamilyMember" m ON m."id"=s."memberId" WHERE s."date">=? AND s."date"<? ORDER BY s."date"').all(toMillis(start), toMillis(endExclusive));
   return {
     schemaVersion: "meal-month.v1",
+    dishPreferences: preferenceContext(db),
+    weeklyReviews: db.prepare('SELECT * FROM "WeeklyReview" WHERE "weekStart">=? AND "weekStart"<?').all(toMillis(sundayFor(start)), toMillis(endExclusive)).map(review => ({...review, weekStart: formatKst(review.weekStart), referenceDate: review.referenceDate ? formatKst(review.referenceDate) : formatKst(review.weekStart)})),
     month: selectedMonth,
     dates,
     timezone: "Asia/Seoul",
@@ -454,6 +461,7 @@ function validatePayload(
   const plansByDate = new Map(
     plans.map((plan) => [formatKst(plan.date), plan]),
   );
+  if (Array.isArray(payload.mealChanges)) errors.push(...validateMealPreferences(db, payload.mealChanges));
   const changedDates = new Set();
   if (payload.mealChanges !== undefined && !Array.isArray(payload.mealChanges))
     errors.push("mealChanges must be an array when provided.");
@@ -641,9 +649,9 @@ function validateMonth(payload, month, allowExisting = false) {
   if (!String(payload?.changeReason ?? "").trim())
     errors.push("changeReason is required.");
   if (!Array.isArray(payload?.mealChanges)) errors.push("mealChanges must be an array.");
-  const changes = payload?.mealChanges ?? [];
+  const changes = Array.isArray(payload?.mealChanges) ? payload.mealChanges : [];
+  errors.push(...validateMealPreferences(db, changes));
   const changedDates = new Set();
-  const mainDishes = new Set();
   for (const [index, change] of changes.entries()) {
     const at = `mealChanges[${index}]`;
     if (!dates.includes(change.date)) errors.push(`${at}.date must be inside ${selectedMonth}.`);
@@ -651,9 +659,6 @@ function validateMonth(payload, month, allowExisting = false) {
     changedDates.add(change.date);
     if (!String(change.lunch ?? "").trim()) errors.push(`${at}.lunch is required.`);
     if (!String(change.main ?? "").trim()) errors.push(`${at}.main is required.`);
-    const normalizedMain = normalizeName(change.main);
-    if (mainDishes.has(normalizedMain)) warnings.push(`${at}.main is duplicated in this month: ${normalizedMain}.`);
-    mainDishes.add(normalizedMain);
     if (!Array.isArray(change.sides) || change.sides.length !== 2 || change.sides.some((side) => !String(side).trim()))
       errors.push(`${at}.sides must contain exactly two named side dishes.`);
     if (Array.isArray(change.sides) && new Set(change.sides.map(normalizeName)).size !== change.sides.length)
@@ -671,86 +676,20 @@ function validateMonth(payload, month, allowExisting = false) {
         change.sides.length === 2,
     )
     .sort((a, b) => a.date.localeCompare(b.date));
-  const previousMonth = previousMonthKey(selectedMonth);
-  const previousSideRows = db
-    .prepare(
-      'SELECT "sideDishes" FROM "MealPlan" WHERE "monthKey"=? ORDER BY "date"',
-    )
-    .all(previousMonth);
-  const previousSideBatches = [];
-  let previousSignature = "";
-  for (const row of previousSideRows) {
-    const sides = parseJsonList(row.sideDishes).map(normalizeName).sort();
-    if (sides.length !== 2) continue;
-    const signature = sides.join("|");
-    if (signature !== previousSignature) previousSideBatches.push(sides);
-    previousSignature = signature;
+  // Repetition and previous-month reuse are allowed. Keep batch length as a
+  // quality warning only; never force novel dishes or a novelty percentage.
+  const batches = [];
+  for (const change of orderedSideChanges) {
+    const signature = change.sides.map(normalizeName).sort().join("|");
+    const last = batches.at(-1);
+    if (last?.signature === signature) last.dates.push(change.date);
+    else batches.push({signature, dates: [change.date]});
   }
-  const previousSidePairs = new Set(
-    previousSideBatches.map((sides) => sides.join("|")),
-  );
-  const previousSideDishBatches = new Map();
-  for (const sides of previousSideBatches)
-    for (const side of sides)
-      previousSideDishBatches.set(
-        side,
-        (previousSideDishBatches.get(side) ?? 0) + 1,
-      );
-  const usedSidePairs = new Map();
-  const sideDishBatches = new Map();
-  for (let index = 0; index < orderedSideChanges.length; index += 3) {
-    const batch = orderedSideChanges.slice(index, index + 3);
-    const expectedSides = batch[0].sides.map(normalizeName).sort();
-    const expectedSignature = expectedSides.join("|");
-    for (const change of batch.slice(1)) {
-      const signature = change.sides.map(normalizeName).sort().join("|");
-      if (signature !== expectedSignature)
-        warnings.push(
-          `Side dishes must stay the same for the 3-day batch ${batch[0].date} through ${batch.at(-1).date}.`,
-        );
-    }
-    if (usedSidePairs.has(expectedSignature))
-      warnings.push(
-        `Side dish pair '${expectedSides.join(" + ")}' is reused in separate monthly batches (${usedSidePairs.get(expectedSignature)} and ${batch[0].date}).`,
-      );
-    else usedSidePairs.set(expectedSignature, batch[0].date);
-    if (previousSidePairs.has(expectedSignature))
-      warnings.push(
-        `Side dish pair '${expectedSides.join(" + ")}' repeats the previous month.`,
-      );
-    for (const side of expectedSides) {
-      const batchDates = sideDishBatches.get(side) ?? [];
-      batchDates.push(batch[0].date);
-      sideDishBatches.set(side, batchDates);
-      if (batchDates.length > 3)
-        warnings.push(
-          `Side dish '${side}' is used in more than three monthly batches (${batchDates.join(", ")}).`,
-        );
-    }
-  }
-  if (previousSideBatches.length) {
-    const currentSides = [...sideDishBatches.keys()];
-    const previousSides = new Set(previousSideDishBatches.keys());
-    const newSideCount = currentSides.filter(
-      (side) => !previousSides.has(side),
-    ).length;
-    const requiredNewSideCount = Math.ceil(currentSides.length * 0.4);
-    if (newSideCount < requiredNewSideCount)
-      warnings.push(
-        `At least 40% of unique side dishes must be new compared with ${previousMonth} (${newSideCount}/${currentSides.length}, requires ${requiredNewSideCount}).`,
-      );
-    for (const [side, dates] of sideDishBatches)
-      if ((previousSideDishBatches.get(side) ?? 0) >= 2 && dates.length > 1)
-        warnings.push(
-          `Side dish '${side}' appeared in multiple ${previousMonth} batches and may be used in only one ${selectedMonth} batch (${dates.join(", ")}).`,
-        );
-  }
+  for (const batch of batches) if (batch.dates.length > 4)
+    warnings.push(`부찬 조합 '${batch.signature}'이 ${batch.dates.length}일 연속입니다. 보관 기간과 새 조리 여부를 확인해 주세요.`);
   const existing = db.prepare('SELECT "date" FROM "MealPlan" WHERE "monthKey"=?').all(selectedMonth);
   if (existing.length && !allowExisting)
     errors.push(`${selectedMonth} already has ${existing.length} saved meal plans and will not be overwritten.`);
-  const previousMains = new Set(db.prepare('SELECT "mainDish" FROM "MealPlan" WHERE "monthKey"=?').all(previousMonth).map((row) => row.mainDish ? normalizeName(row.mainDish) : "").filter(Boolean));
-  for (const main of mainDishes)
-    if (previousMains.has(main)) warnings.push(`main dish '${main}' repeats the previous month.`);
   return { valid: errors.length === 0, month: selectedMonth, errors, warnings, counts: { mealChanges: changes.length } };
 }
 
@@ -937,44 +876,9 @@ function storedRecipes(weekStart, { skipInvalid = false } = {}) {
 }
 
 function missingStoredCoverage(weekStart) {
-  const startMs = toMillis(weekStart),
-    endMs = toMillis(addDays(weekStart, 7));
-  const plans = db
-    .prepare(
-      'SELECT "date","lunchPlan","mainDish","sideDishes","dinnerDiningOut" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
-    )
-    .all(startMs, endMs);
-  const coverage = new Set();
-  const allRecipes = storedRecipes(weekStart);
-  const recipes = allRecipes.filter((recipe) => !recipe.invalidIngredient);
-  for (const recipe of recipes)
-    for (const date of recipe.plannedDates)
-      coverage.add(`${date}|${recipe.title}`);
-  const missing = [];
-  for (const plan of plans) {
-    const date = formatKst(plan.date);
-    if (!plan.dinnerDiningOut)
-      for (const dish of [
-        plan.mainDish,
-        ...parseJsonList(plan.sideDishes),
-      ].filter(Boolean))
-        if (!coverage.has(`${date}|${dish}`)) missing.push(`${date}: ${dish}`);
-    const day = new Date(`${date}T00:00:00Z`).getUTCDay();
-    if (
-      [0, 6].includes(day) &&
-      plan.lunchPlan &&
-      !plan.lunchPlan.includes("회사 식사") &&
-      !recipes.some(
-        (recipe) =>
-          recipe.category === "점심" && recipe.plannedDates.includes(date),
-      )
-    )
-      missing.push(`${date}: ${plan.lunchPlan} (점심)`);
-  }
-  for (const recipe of allRecipes.filter((recipe) => recipe.invalidIngredient))
-    for (const date of recipe.plannedDates)
-      missing.push(`${date}: ${recipe.title} (재료 수량 형식 오류)`);
-  return missing;
+  const plans = db.prepare('SELECT * FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"').all(toMillis(weekStart), toMillis(addDays(weekStart, 7)));
+  const recipes = db.prepare('SELECT * FROM "Recipe" WHERE "weekKeys" LIKE ?').all(`%${weekStart}%`).map(recipe => ({...recipe, ingredients: db.prepare('SELECT "amount" FROM "Ingredient" WHERE "recipeId"=?').all(recipe.id)}));
+  return missingRecipeCoverage(plans, recipes);
 }
 
 function writeShopping(weekStart, recipes, now) {
@@ -2102,6 +2006,11 @@ try {
     manageGroceryForChat(readPayload(flags.input), requireWeek(flags.week));
   if (command === "manage-pantry")
     managePantryForChat(readPayload(flags.input));
+  if (command === "manage-preference") {
+    const payload = readPayload(flags.input);
+    const backup = backupDatabase("menu-preference");
+    printJson({...savePreference(db, payload), backup});
+  }
   if (command === "manage-family")
     manageFamilyForChat(readPayload(flags.input));
   if (command === "manage-review")
