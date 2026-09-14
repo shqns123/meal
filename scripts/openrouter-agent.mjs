@@ -168,10 +168,38 @@ function citations(annotations) {
 function requestsMealDataChange(message) {
   const text = String(message || "").replace(/\s+/g, " ");
   const mentionsMealData =
-    /(월간|주간|식단|메뉴|주찬|부찬|반찬|점심|저녁|레시피|장보기|외식|미식사|식사\s*여부|집에서\s*(?:먹|식사))/.test(text);
+    /(월간|주간|식단|메뉴|주찬|부찬|반찬|점심|저녁|레시피|장보기|외식|미식사|식사\s*여부|집에서\s*(?:먹|식사)|냉장고|펜트리|보유\s*재료|재고|가족|알레르기|선호|기피|씹기|매운맛|주간\s*점검|일정|출근|출장|부재|회사\s*식사)/.test(text);
   const asksToChange =
-    /(바꿔|바꾸어|바꿔\s*달|변경\s*해|수정\s*해|교체\s*해|삭제|지워|추가|등록|재생성|재설정|초기화|새로\s*(?:짜|만들)|짜\s*줘|만들어\s*줘|반영\s*해|저장\s*해|구매\s*(?:완료|취소)|미식사|외식)/.test(text);
+    /(바꿔|바꾸어|바꿔\s*달|변경\s*해|수정\s*해|교체\s*해|삭제|지워|추가|등록|재생성|재설정|초기화|새로\s*(?:짜|만들)|짜\s*줘|만들어\s*줘|반영\s*해|저장\s*해|구매\s*(?:완료|취소)|미식사|외식|넣어|빼\s*줘|남았|소진|다\s*먹|없어졌|출근|출장|부재|회사\s*식사)/.test(text);
   return mentionsMealData && asksToChange;
+}
+function effectiveMutationInstruction() {
+  if (requestsMealDataChange(task.message)) return task.message;
+  const followUp = /(그걸|그렇게|이걸|앞에서|방금|해\s*줘|해주세요|부터|까지|전부|모두)/.test(
+    String(task.message || ""),
+  );
+  if (!followUp) return null;
+  const previous = [...(task.conversation || [])]
+    .reverse()
+    .find((item) => item.role === "user" && requestsMealDataChange(item.content));
+  return previous
+    ? `[이전 요청]\n${previous.content}\n[현재 후속 요청]\n${task.message}`
+    : null;
+}
+function confirmationQuestion(decisions, instruction) {
+  const confirmed = /(확인했|확인\s*후|동의|진행\s*해|실행\s*해|그래\s*,?\s*해|정말\s*삭제)/.test(
+    String(instruction || ""),
+  );
+  if (confirmed) return null;
+  const broad = decisions.find(
+    (decision) =>
+      decision.intent === "RESET_MONTH" ||
+      decision.intent === "DELETE_RECIPE" && decision.all === true,
+  );
+  if (!broad) return null;
+  return broad.intent === "RESET_MONTH"
+    ? `${broad.month} 식단을 재설정하면 해당 범위의 기존 메뉴·레시피·자동 장보기가 교체됩니다. 계속하려면 ‘확인했어, 진행해줘’라고 답해 주세요.`
+    : `${broad.weekStart} 주차의 레시피를 모두 삭제하면 자동 장보기도 다시 계산됩니다. 계속하려면 ‘확인했어, 진행해줘’라고 답해 주세요.`;
 }
 function currentKstDate() {
   return new Intl.DateTimeFormat("en-CA", {
@@ -191,36 +219,48 @@ function validDate(value) {
 function validWeek(value) {
   return validDate(value) && new Date(`${value}T00:00:00Z`).getUTCDay() === 0;
 }
-async function classifyChatMutation(ruleFiles) {
+async function classifyChatMutations(ruleFiles) {
   const targetMonth = selectedMutationMonth(task.message, task.targetMonth);
   const result = await ask(
     systemPrompt(ruleFiles) +
-      `\n\n사용자의 변경 요청을 앱 기능 하나로 분류한다. 실제 변경은 하지 말고 아래 JSON만 반환한다.
-intent는 UPDATE_MEALS, GENERATE_MONTH, RESET_MONTH, REGENERATE_RECIPES, ADD_RECIPE, DELETE_RECIPE, REGENERATE_GROCERY, ADD_GROCERY, DELETE_GROCERY, SET_GROCERY_PURCHASED, UPDATE_ATTENDANCE, CLARIFY 중 하나다.
+      `\n\n사용자의 변경 요청을 실행 순서대로 하나 이상의 앱 기능으로 분류한다. 실제 변경은 하지 말고 아래 JSON만 반환한다.
+intent는 UPDATE_MEALS, GENERATE_MONTH, RESET_MONTH, REGENERATE_RECIPES, ADD_RECIPE, DELETE_RECIPE, REGENERATE_GROCERY, ADD_GROCERY, DELETE_GROCERY, SET_GROCERY_PURCHASED, MANAGE_PANTRY, UPDATE_FAMILY, UPDATE_WEEKLY_REVIEW, UPDATE_ATTENDANCE, CLARIFY 중 하나다.
 월간 식단을 새로 짜거나 다시 만들라는 요청은 기존 식단을 교체한다는 말이 명확할 때만 RESET_MONTH, 그렇지 않으면 GENERATE_MONTH다.
 레시피 추가는 반드시 현재 식단에 있는 메뉴의 레시피를 보충하는 의미다. 레시피 삭제는 제목이 특정되어야 한다.
+냉장고·펜트리·보유 재료의 추가·수정·증감·삭제는 MANAGE_PANTRY다. 가족의 알레르기·씹기·매운맛·선호 메모 변경은 UPDATE_FAMILY다. 먹고 싶은 음식·피할 음식·주간 메모 저장은 UPDATE_WEEKLY_REVIEW다.
 날짜·제목·품목이 불명확하여 여러 대상을 바꿀 수 있으면 CLARIFY와 자연스러운 한국어 answer를 반환한다.
 이번 주는 ${task.weekStart}, 선택 월은 ${targetMonth}, 오늘은 ${currentKstDate()}다.
 레시피를 모두·전부·전체 삭제하라는 명시적 요청에만 all을 true로 한다.
-형식: {"intent":"...","answer":"확인 질문 또는 빈 문자열","month":"YYYY-MM","weekStart":"YYYY-MM-DD 일요일","date":"YYYY-MM-DD 또는 null","dates":["YYYY-MM-DD"],"title":"레시피 제목 또는 null","category":"주찬|반찬|점심|null","all":false,"groceryName":"품목명 또는 null","quantity":1,"unit":"개","groceryCategory":"기타","purchased":true,"dinnerDiningOut":null,"attendance":[{"role":"father|mother","lunchNotAtHome":true,"dinnerNotAtHome":false}]}`,
+서로 독립된 변경이 여러 개면 actions에 각각 넣는다. 한 작업의 대상이 모호하면 CLARIFY 하나만 반환한다. 최대 5개다.
+형식: {"actions":[{"intent":"...","answer":"확인 질문 또는 빈 문자열","month":"YYYY-MM","weekStart":"YYYY-MM-DD 일요일","date":"YYYY-MM-DD 또는 null","dates":["YYYY-MM-DD"],"title":"레시피 제목 또는 null","category":"주찬|반찬|점심|null","all":false,"groceryName":"품목명 또는 null","quantity":1,"unit":"개","groceryCategory":"기타","purchased":true,"pantry":{"operation":"upsert|adjust|delete","name":"재료명","quantity":1,"unit":"g","category":"채소","expiresAt":"YYYY-MM-DD 또는 null"},"familyUpdate":{"role":"father|mother|child","name":null,"allergies":null,"chewingAbility":null,"spiceTolerance":null,"dietaryNotes":null},"weeklyReview":{"referenceDate":"YYYY-MM-DD","wantedFoods":null,"avoidFoods":null,"note":null},"dinnerDiningOut":null,"attendance":[{"role":"father|mother","lunchNotAtHome":true,"dinnerNotAtHome":false,"isWorking":null,"eatsAtCompany":null,"isAway":null,"note":null}]}]}`,
     `[사용자 요청]\n${task.message}`,
     false,
   );
-  const decision = modelJson(result.content);
+  const classified = modelJson(result.content);
   const allowed = new Set([
     "UPDATE_MEALS", "GENERATE_MONTH", "RESET_MONTH", "REGENERATE_RECIPES",
     "ADD_RECIPE", "DELETE_RECIPE", "REGENERATE_GROCERY", "ADD_GROCERY",
-    "DELETE_GROCERY", "SET_GROCERY_PURCHASED", "UPDATE_ATTENDANCE", "CLARIFY",
+    "DELETE_GROCERY", "SET_GROCERY_PURCHASED", "MANAGE_PANTRY",
+    "UPDATE_FAMILY", "UPDATE_WEEKLY_REVIEW", "UPDATE_ATTENDANCE", "CLARIFY",
   ]);
-  if (!allowed.has(decision.intent))
-    return { intent: "CLARIFY", answer: "어떤 항목을 어떻게 변경할지 조금 더 구체적으로 알려주세요." };
-  decision.month = validMonth(decision.month) ? decision.month : targetMonth;
-  decision.weekStart = validWeek(decision.weekStart)
-    ? decision.weekStart
-    : validDate(decision.date)
-      ? sundayForDate(decision.date)
-      : task.weekStart;
-  return decision;
+  const decisions = (Array.isArray(classified.actions)
+    ? classified.actions
+    : [classified])
+    .slice(0, 5)
+    .map((decision) => {
+      if (!decision || !allowed.has(decision.intent))
+        return { intent: "CLARIFY", answer: "어떤 항목을 어떻게 변경할지 조금 더 구체적으로 알려주세요." };
+      decision.month = validMonth(decision.month) ? decision.month : targetMonth;
+      decision.weekStart = validWeek(decision.weekStart)
+        ? decision.weekStart
+        : validDate(decision.date)
+          ? sundayForDate(decision.date)
+          : task.weekStart;
+      return decision;
+    });
+  return decisions.length
+    ? decisions
+    : [{ intent: "CLARIFY", answer: "어떤 항목을 어떻게 변경할지 조금 더 구체적으로 알려주세요." }];
 }
 function selectedMutationMonth(message, fallbackMonth) {
   const text = String(message || "");
@@ -291,10 +331,9 @@ async function runChatMealChange(ruleFiles) {
   }).format(new Date());
   const result = await ask(
     systemPrompt(ruleFiles) +
-      "\n\n이번 작업은 AI 채팅에서 받은 실제 식단 변경 요청이다. 요청한 날짜만 바꾸고 날짜가 불명확하면 mealChanges를 비운 채 answer에 확인 질문을 작성한다. '7일부터 9일까지'는 선택 월의 7·8·9일을 모두 뜻한다. 각 mealChanges에는 기존 값을 유지하는 항목도 포함해 date, lunch, main, sides 두 개를 완전하게 반환한다. 변경된 각 날짜의 주찬·부찬·필요한 주말 점심을 모두 덮는 recipes를 만든다. 같은 메뉴를 여러 변경 날짜에 먹으면 레시피 하나의 plannedDates에 해당 날짜를 모두 넣되, 요청하지 않은 날짜는 넣지 않는다. JSON: {\"answer\":\"처리 결과 또는 확인 질문\",\"changeReason\":\"변경 이유\",\"mealChanges\":[...],\"recipes\":[...]}",
+      "\n\n이번 작업은 AI 채팅에서 받은 실제 식단 변경 요청이다. 요청한 날짜만 바꾸고 날짜가 불명확하면 mealChanges를 비운 채 answer에 확인 질문을 작성한다. '7일부터 9일까지'는 선택 월의 7·8·9일을 모두 뜻한다. 각 mealChanges에는 기존 값을 유지하는 항목도 포함해 date, lunch, main, sides 두 개를 완전하게 반환한다. 레시피는 후속 작업에서 별도로 생성하므로 recipes는 만들지 않는다. JSON: {\"answer\":\"처리 결과 또는 확인 질문\",\"changeReason\":\"변경 이유\",\"mealChanges\":[...]}",
     `[오늘]\n${today}\n[선택 월]\n${targetMonth}\n[월간 컨텍스트]\n${JSON.stringify(month)}\n[사용자 요청]\n${task.message}`,
-    true,
-    12,
+    false,
   );
   const requested = modelJson(result.content);
   const changes = Array.isArray(requested.mealChanges)
@@ -324,32 +363,46 @@ async function runChatMealChange(ruleFiles) {
   const existingDates = new Set(current.meals.map((meal) => meal.date));
   if (dates.some((date) => !existingDates.has(date)))
     throw new Error("요청한 날짜 중 저장된 식단이 없는 날이 있습니다.");
-  let payload = {
-    schemaVersion: "meal-week.v1",
-    weekStart,
-    changeReason: String(requested.changeReason || task.message).slice(0, 1000),
-    mealChanges: changes,
-    recipes: Array.isArray(requested.recipes) ? requested.recipes : [],
-  };
-  payload = mergeReusableRecipes(payload, current);
-  payload = await completePayload(
-    payload,
-    compactPlannerContext(current),
-    ruleFiles,
-    `${dates.join(", ")}만 변경하고 같은 주의 다른 날짜는 유지한다. 변경 날짜의 레시피와 해당 주 장보기를 함께 갱신한다.`,
-    (candidate) => validate("validate-week", candidate, ["--week", weekStart]),
-    true,
-    8,
-  );
-  publish(
-    "publish-week",
-    writeInput("chat-change-" + task.requestId, payload),
-    ["--week", weekStart],
-  );
+  for (const change of changes) {
+    let dayPayload = {
+      schemaVersion: "meal-week.v1",
+      weekStart,
+      changeReason: String(requested.changeReason || task.message).slice(0, 1000),
+      mealChanges: [change],
+      recipes: [],
+    };
+    dayPayload = await completePayload(
+      dayPayload,
+      compactPlannerContext(current),
+      ruleFiles,
+      `${change.date} 식단만 변경하고 레시피는 만들지 않는다.`,
+      (candidate) => validate(
+        "validate-day",
+        { ...candidate, recipes: [] },
+        ["--week", weekStart, "--date", change.date],
+      ),
+      false,
+    );
+    dayPayload.recipes = [];
+    publish(
+      "publish-day",
+      writeInput("chat-change-" + change.date, dayPayload),
+      ["--week", weekStart, "--date", change.date],
+    );
+  }
+  let recipeStatus = "관련 레시피는 별도 재생성 작업이 필요합니다.";
+  try {
+    await generateWeekRecipes(
+      ruleFiles,
+      weekStart,
+      `${dates.join(", ")} 변경 메뉴의 레시피를 보충하고 기존에 검증된 레시피는 재사용한다.`,
+    );
+    recipeStatus = "관련 레시피와 장보기도 다시 계산했습니다.";
+  } catch (error) {
+    console.warn("Meal changes were saved but recipe refresh failed:", error instanceof Error ? error.message : error);
+  }
   return {
-    answer:
-      String(requested.answer || "").trim() ||
-      `${dates.join(", ")} 식단과 관련 레시피·장보기를 변경했습니다.`,
+    answer: `${String(requested.answer || "").trim() || `${dates.join(", ")} 식단을 변경했습니다.`} ${recipeStatus}`,
     sources: citations(result.annotations),
   };
 }
@@ -467,7 +520,7 @@ async function generateWeekRecipes(ruleFiles, weekStart, instruction) {
     instruction;
   const result = await ask(
     systemPrompt(ruleFiles),
-    `[주간 컨텍스트]\n${JSON.stringify(modelContext)}\n[사용자 요청]\n${task.message}\n[작업 범위]\n${scope}${reuseInstruction}\nmeal-week.v1 JSON만 반환한다.`,
+    `[주간 컨텍스트]\n${JSON.stringify(modelContext)}\n[사용자 요청]\n${task.message || task.prompt || instruction}\n[작업 범위]\n${scope}${reuseInstruction}\nmeal-week.v1 JSON만 반환한다.`,
     true,
     searchBudget,
   );
@@ -659,6 +712,53 @@ function runChatAttendanceAction(decision) {
   return { answer: `${decision.date}의 외식·가족 식사 여부를 날짜 상세에 반영했습니다.`, sources: [] };
 }
 
+function runChatPantryAction(decision) {
+  const pantry = decision.pantry && typeof decision.pantry === "object"
+    ? decision.pantry
+    : null;
+  if (!pantry || !String(pantry.name || "").trim())
+    return { answer: "관리할 냉장고·펜트리 재료 이름과 수량을 알려주세요.", sources: [] };
+  const input = writeInput(`chat-pantry-${task.requestId}`, pantry);
+  try { ctl("manage-pantry", "--input", input); }
+  finally { fs.rmSync(input, { force: true }); }
+  const verb = pantry.operation === "delete"
+    ? "삭제"
+    : pantry.operation === "adjust"
+      ? "수량 조정"
+      : "저장";
+  return { answer: `보유 재료 '${pantry.name}'을 ${verb}했습니다.`, sources: [] };
+}
+
+function runChatFamilyAction(decision) {
+  const update = decision.familyUpdate && typeof decision.familyUpdate === "object"
+    ? Object.fromEntries(
+        Object.entries(decision.familyUpdate).filter(
+          ([key, value]) => key === "role" || value !== null && value !== undefined,
+        ),
+      )
+    : null;
+  if (!update || !["father", "mother", "child"].includes(update.role))
+    return { answer: "변경할 가족 구성원과 알레르기·식사 특성을 알려주세요.", sources: [] };
+  const input = writeInput(`chat-family-${task.requestId}`, update);
+  try { ctl("manage-family", "--input", input); }
+  finally { fs.rmSync(input, { force: true }); }
+  return { answer: `${update.role === "father" ? "아빠" : update.role === "mother" ? "엄마" : "아기"}의 가족 정보를 변경했습니다.`, sources: [] };
+}
+
+function runChatReviewAction(decision) {
+  if (!validWeek(decision.weekStart))
+    return { answer: "주간 점검을 저장할 주차나 날짜를 알려주세요.", sources: [] };
+  const review = decision.weeklyReview && typeof decision.weeklyReview === "object"
+    ? decision.weeklyReview
+    : null;
+  if (!review)
+    return { answer: "먹고 싶은 음식, 피할 음식 또는 주간 메모를 알려주세요.", sources: [] };
+  const input = writeInput(`chat-review-${task.requestId}`, review);
+  try { ctl("manage-review", "--week", decision.weekStart, "--input", input); }
+  finally { fs.rmSync(input, { force: true }); }
+  return { answer: `${decision.weekStart} 주차의 점검 정보를 저장했습니다.`, sources: [] };
+}
+
 async function dispatchChatMutation(ruleFiles, decision) {
   if (decision.intent === "CLARIFY")
     return {
@@ -672,6 +772,9 @@ async function dispatchChatMutation(ruleFiles, decision) {
     return runChatRecipeAction(ruleFiles, decision);
   if (["REGENERATE_GROCERY", "ADD_GROCERY", "DELETE_GROCERY", "SET_GROCERY_PURCHASED"].includes(decision.intent))
     return runChatGroceryAction(decision);
+  if (decision.intent === "MANAGE_PANTRY") return runChatPantryAction(decision);
+  if (decision.intent === "UPDATE_FAMILY") return runChatFamilyAction(decision);
+  if (decision.intent === "UPDATE_WEEKLY_REVIEW") return runChatReviewAction(decision);
   if (decision.intent === "UPDATE_ATTENDANCE")
     return runChatAttendanceAction(decision);
   return { answer: "요청한 작업을 처리할 수 없습니다. 변경할 날짜와 항목을 다시 알려주세요.", sources: [] };
@@ -719,9 +822,24 @@ async function completePayload(payload, current, ruleFiles, scope, runValidation
 
 async function runChat() {
   const ruleFiles = rules();
-  if (requestsMealDataChange(task.message)) {
-    const decision = await classifyChatMutation(ruleFiles);
-    const response = await dispatchChatMutation(ruleFiles, decision);
+  const mutationInstruction = effectiveMutationInstruction();
+  if (mutationInstruction) {
+    task.message = mutationInstruction;
+    const decisions = await classifyChatMutations(ruleFiles);
+    const clarification = decisions.find((decision) => decision.intent === "CLARIFY");
+    const confirmation = clarification
+      ? null
+      : confirmationQuestion(decisions, mutationInstruction);
+    const responses = [];
+    if (clarification) responses.push(await dispatchChatMutation(ruleFiles, clarification));
+    else if (confirmation) responses.push({ answer: confirmation, sources: [] });
+    else
+      for (const decision of decisions)
+        responses.push(await dispatchChatMutation(ruleFiles, decision));
+    const response = {
+      answer: responses.map((item) => item.answer).filter(Boolean).join("\n"),
+      sources: responses.flatMap((item) => item.sources || []).slice(0, 8),
+    };
     publish(
       "reply-chat",
       writeInput("chat-" + task.requestId, response),
@@ -782,8 +900,10 @@ async function runPlanner() {
   const current = context(task.weekStart);
   if (task.action === "REVIEW_WEEK") {
     const result = await ask(
-      systemPrompt(ruleFiles) + "\n\n주간 점검이다. referenceDate부터 토요일까지만 판단한다. 유지하면 {\"decision\":\"maintain\",\"summary\":\"...\"}; 수정하면 {\"decision\":\"change\",\"changeReason\":\"...\",\"mealChanges\":[...],\"recipes\":[...]}를 반환한다. 수정 레시피는 변경 날짜만 포함하고 plannedDates는 정확히 한 날짜여야 한다.",
-      "[주간 컨텍스트]\n" + JSON.stringify(current) + "\n[사용자 점검 정보]\n" + task.prompt, true, 8);
+      systemPrompt(ruleFiles) + "\n\n주간 점검이다. referenceDate부터 토요일까지만 판단한다. 유지하면 {\"decision\":\"maintain\",\"summary\":\"...\"}; 수정하면 {\"decision\":\"change\",\"changeReason\":\"...\",\"mealChanges\":[...]}를 반환한다. 레시피는 후속 작업에서 별도로 생성한다.",
+      "[주간 컨텍스트]\n" + JSON.stringify(current) + "\n[사용자 점검 정보]\n" + task.prompt,
+      false,
+    );
     let payload = modelJson(result.content);
     if (payload.decision === "maintain") {
       ctl("record-review", "--week", task.weekStart, "--summary", String(payload.summary || "현재 식단을 유지합니다."), "--request-id", task.requestId);
@@ -791,33 +911,46 @@ async function runPlanner() {
     }
     if (payload.decision !== "change" || !Array.isArray(payload.mealChanges) || !payload.mealChanges.length)
       throw new Error("주간 점검 결과 형식이 올바르지 않습니다.");
-    for (let index = 0; index < payload.mealChanges.length; index += 1) {
-      const change = payload.mealChanges[index];
-      const recipes = (payload.recipes || []).filter((recipe) =>
-        Array.isArray(recipe.plannedDates) && recipe.plannedDates.every((date) => date === change.date));
+    for (const change of payload.mealChanges) {
       let dayPayload = { schemaVersion: "meal-week.v1", weekStart: task.weekStart,
         changeReason: String(payload.changeReason || "주간 점검 결과 식단을 조정했습니다."),
-        mealChanges: [change], recipes };
-      const scope = change.date + " 하루만 변경하며 레시피 plannedDates도 이 날짜만 포함한다.";
+        mealChanges: [change], recipes: [] };
+      const scope = change.date + " 하루 식단만 변경하고 레시피는 만들지 않는다.";
       dayPayload = await completePayload(
         dayPayload,
         compactPlannerContext(context(task.weekStart)),
         ruleFiles,
         scope,
-        (candidate) => validate("validate-day", candidate, ["--week", task.weekStart, "--date", change.date]),
-        true,
-        6,
+        (candidate) => validate(
+          "validate-day",
+          { ...candidate, recipes: [] },
+          ["--week", task.weekStart, "--date", change.date],
+        ),
+        false,
       );
-      const requestIdArgs = index === payload.mealChanges.length - 1 ? ["--request-id", task.requestId] : [];
+      dayPayload.recipes = [];
       publish("publish-day", writeInput("review-" + change.date, dayPayload),
-        ["--week", task.weekStart, "--date", change.date, ...requestIdArgs]);
+        ["--week", task.weekStart, "--date", change.date]);
     }
+    let summary = String(payload.changeReason || "주간 점검 결과 식단을 조정했습니다.");
+    try {
+      await generateWeekRecipes(
+        ruleFiles,
+        task.weekStart,
+        "주간 점검으로 변경된 메뉴의 레시피를 보충하고 검증된 기존 레시피는 재사용한다.",
+      );
+      summary += " 관련 레시피와 장보기도 다시 계산했습니다.";
+    } catch (error) {
+      console.warn("Weekly meals were saved but recipe refresh failed:", error instanceof Error ? error.message : error);
+      summary += " 식단은 저장했지만 레시피와 장보기 갱신은 완료하지 못했습니다.";
+    }
+    ctl("record-review", "--week", task.weekStart, "--summary", summary, "--request-id", task.requestId);
     notify(); return;
   }
 
   const isDaily = task.action === "UPDATE_DAY";
   const scope = isDaily
-    ? "선택 날짜 " + task.date + "만 변경한다. mealChanges는 그 날짜 하나만, 모든 recipes.plannedDates도 그 날짜 하나만 포함한다."
+    ? "선택 날짜 " + task.date + " 식단만 변경한다. mealChanges는 그 날짜 하나만 포함하고 recipes는 빈 배열로 둔다."
     : task.action === "REGENERATE_RECIPES"
       ? "월간 캘린더 메뉴는 절대 바꾸지 않는다. mealChanges는 빈 배열이다. 선택 주의 저녁 주찬·부찬과 집에서 먹는 주말 점심 레시피를 모두 만든다."
       : "월간 캘린더 메뉴는 절대 바꾸지 않는다. mealChanges는 빈 배열이다. 선택 주의 레시피를 모두 만들고 장보기에 쓸 수 있게 한다.";
@@ -846,12 +979,13 @@ async function runPlanner() {
     ? "\n[재사용 규칙]\n컨텍스트의 reusableRecipes는 SQLite에서 검증된 정확히 같은 메뉴다. 이 메뉴들은 recipes에 다시 생성하지 말고 누락된 메뉴만 검색한다. 앱이 검증된 레시피를 최종 JSON에 자동으로 합친다."
     : "";
   const searchBudget = isDaily
-    ? 4
+    ? 0
     : Math.min(20, Math.max(4, 22 - (current.reusableRecipes?.length || 0)));
   const result = await ask(systemPrompt(ruleFiles),
-    "[주간 컨텍스트]\n" + JSON.stringify(modelContext) + "\n[사용자 요청]\n" + task.prompt + "\n[작업 범위]\n" + scope + reuseInstruction + "\nmeal-week.v1 JSON만 반환한다.", true, searchBudget);
+    "[주간 컨텍스트]\n" + JSON.stringify(modelContext) + "\n[사용자 요청]\n" + task.prompt + "\n[작업 범위]\n" + scope + reuseInstruction + "\nmeal-week.v1 JSON만 반환한다.", !isDaily, searchBudget);
   let payload = modelJson(result.content);
-  if (!isDaily) payload = mergeReusableRecipes(payload, current);
+  if (isDaily) payload.recipes = [];
+  else payload = mergeReusableRecipes(payload, current);
   payload = await completePayload(
     payload,
     modelContext,
@@ -860,11 +994,23 @@ async function runPlanner() {
     (candidate) => isDaily
       ? validate("validate-day", candidate, ["--week", task.weekStart, "--date", task.date])
       : validate("validate-week", candidate, ["--week", task.weekStart]),
-    true,
+    !isDaily,
     searchBudget,
   );
+  if (isDaily) payload.recipes = [];
   const input = writeInput((isDaily ? "day-" + task.date : "week-" + task.weekStart), payload);
-  if (isDaily) publish("publish-day", input, ["--week", task.weekStart, "--date", task.date, "--request-id", task.requestId]);
+  if (isDaily) {
+    publish("publish-day", input, ["--week", task.weekStart, "--date", task.date, "--request-id", task.requestId]);
+    try {
+      await generateWeekRecipes(
+        ruleFiles,
+        task.weekStart,
+        `${task.date} 변경 메뉴의 레시피를 보충하고 검증된 기존 레시피는 재사용한다.`,
+      );
+    } catch (error) {
+      console.warn("Daily meal was saved but recipe refresh failed:", error instanceof Error ? error.message : error);
+    }
+  }
   else if (task.action === "REGENERATE_RECIPES") publish("publish-recipes", input, ["--week", task.weekStart, "--request-id", task.requestId]);
   else publish("publish-week", input, ["--week", task.weekStart, "--request-id", task.requestId]);
   notify();

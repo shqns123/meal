@@ -62,9 +62,6 @@ export async function PUT(request: Request) {
         update: {
           lunchNotAtHome: Boolean(attendance?.lunchNotAtHome),
           dinnerNotAtHome: Boolean(attendance?.dinnerNotAtHome),
-          isWorking: false,
-          eatsAtCompany: false,
-          isAway: false,
         },
         create: {
           date,

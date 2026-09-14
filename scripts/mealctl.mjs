@@ -26,6 +26,9 @@ if (
     "rebuild-shopping",
     "delete-recipe",
     "manage-grocery",
+    "manage-pantry",
+    "manage-family",
+    "manage-review",
     "update-attendance",
     "reply-chat",
     "record-review",
@@ -66,6 +69,9 @@ function usage() {
   node scripts/mealctl.mjs rebuild-shopping --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs delete-recipe --week YYYY-MM-DD [--title "recipe title" | --all true] [--category CATEGORY] [--date YYYY-MM-DD]
   node scripts/mealctl.mjs manage-grocery --week YYYY-MM-DD --input /path/action.json
+  node scripts/mealctl.mjs manage-pantry --input /path/action.json
+  node scripts/mealctl.mjs manage-family --input /path/action.json
+  node scripts/mealctl.mjs manage-review --week YYYY-MM-DD --input /path/action.json
   node scripts/mealctl.mjs update-attendance --date YYYY-MM-DD --input /path/action.json
   node scripts/mealctl.mjs reply-chat --id REQUEST_ID --input /path/chat-response.json
   node scripts/mealctl.mjs record-review --week YYYY-MM-DD --summary "reason" [--request-id ID]
@@ -248,7 +254,7 @@ function loadContext(weekStart) {
     .all(startMs, endExclusiveMs);
   const schedules = db
     .prepare(
-      `SELECT s."date",s."memberId",s."lunchNotAtHome",s."dinnerNotAtHome",m.name AS memberName,m.role AS memberRole FROM "FamilySchedule" s JOIN "FamilyMember" m ON m.id=s.memberId WHERE s.date>=? AND s.date<? ORDER BY s.date`,
+      `SELECT s."date",s."memberId",s."isWorking",s."eatsAtCompany",s."isAway",s."lunchNotAtHome",s."dinnerNotAtHome",s."note",m.name AS memberName,m.role AS memberRole FROM "FamilySchedule" s JOIN "FamilyMember" m ON m.id=s.memberId WHERE s.date>=? AND s.date<? ORDER BY s.date`,
     )
     .all(startMs, endExclusiveMs);
   const pantry = db
@@ -371,7 +377,7 @@ function loadMonthContext(month) {
   const monthMeals = db.prepare('SELECT "date","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote" FROM "MealPlan" WHERE "monthKey"=? ORDER BY "date"').all(selectedMonth);
   const previousMeals = db.prepare('SELECT "date","mainDish","sideDishes" FROM "MealPlan" WHERE "monthKey"=? ORDER BY "date"').all(previousMonth);
   const recentMeals = db.prepare('SELECT "monthKey","date","mainDish","sideDishes" FROM "MealPlan" WHERE "monthKey">=? AND "monthKey"<? ORDER BY "date"').all(shiftMonth(selectedMonth, -3), selectedMonth);
-  const schedules = db.prepare('SELECT s."date",s."lunchNotAtHome",s."dinnerNotAtHome",m."name" AS "memberName",m."role" AS "memberRole" FROM "FamilySchedule" s JOIN "FamilyMember" m ON m."id"=s."memberId" WHERE s."date">=? AND s."date"<? ORDER BY s."date"').all(toMillis(start), toMillis(endExclusive));
+  const schedules = db.prepare('SELECT s."date",s."isWorking",s."eatsAtCompany",s."isAway",s."lunchNotAtHome",s."dinnerNotAtHome",s."note",m."name" AS "memberName",m."role" AS "memberRole" FROM "FamilySchedule" s JOIN "FamilyMember" m ON m."id"=s."memberId" WHERE s."date">=? AND s."date"<? ORDER BY s."date"').all(toMillis(start), toMillis(endExclusive));
   return {
     schemaVersion: "meal-month.v1",
     month: selectedMonth,
@@ -391,7 +397,17 @@ function loadMonthContext(month) {
   };
 }
 
-const banned = ["브로콜리", "파프리카", "피망"];
+const banned = [
+  "브로콜리",
+  "파프리카",
+  "피망",
+  ...db
+    .prepare('SELECT "allergies" FROM "FamilyMember" WHERE TRIM("allergies")<>\'\'')
+    .all()
+    .flatMap((row) => String(row.allergies).split(/[,/·\n]/))
+    .map((item) => item.trim())
+    .filter((item) => item && !/^(없음|없어요|해당 없음)$/i.test(item)),
+];
 const basicStock = new Set([
   "쌀",
   "밥",
@@ -411,7 +427,12 @@ const basicStock = new Set([
 ]);
 const allowedBlogHosts = new Set(["blog.naver.com", "m.blog.naver.com"]);
 
-function validatePayload(payload, weekStart, scopeDate = null) {
+function validatePayload(
+  payload,
+  weekStart,
+  scopeDate = null,
+  requireRecipeCoverage = true,
+) {
   const errors = [];
   const warnings = [];
   if (payload?.schemaVersion && payload.schemaVersion !== "meal-week.v1")
@@ -552,11 +573,11 @@ function validatePayload(payload, weekStart, scopeDate = null) {
   }
   for (const [name, units] of unitsByIngredient)
     if (units.size > 1)
-      errors.push(
+      warnings.push(
         `Ingredient '${name}' uses incompatible units: ${[...units].join(", ")}.`,
       );
 
-  for (const plan of plans) {
+  if (requireRecipeCoverage) for (const plan of plans) {
     const date = formatKst(plan.date);
     if (scopeDate && date !== scopeDate) continue;
     if (!plan.dinnerDiningOut)
@@ -605,13 +626,14 @@ function validateDay(payload, weekStart, date) {
     date > addDays(weekStart, 6)
   )
     fail("--date must be inside the selected week.");
-  return validatePayload(payload, weekStart, date);
+  return validatePayload(payload, weekStart, date, false);
 }
 
 function validateMonth(payload, month, allowExisting = false) {
   const selectedMonth = requireMonth(month);
   const dates = monthDates(selectedMonth);
   const errors = [];
+  const warnings = [];
   if (payload?.schemaVersion && payload.schemaVersion !== "meal-month.v1")
     errors.push("schemaVersion must be meal-month.v1.");
   if (payload?.month !== selectedMonth)
@@ -630,7 +652,7 @@ function validateMonth(payload, month, allowExisting = false) {
     if (!String(change.lunch ?? "").trim()) errors.push(`${at}.lunch is required.`);
     if (!String(change.main ?? "").trim()) errors.push(`${at}.main is required.`);
     const normalizedMain = normalizeName(change.main);
-    if (mainDishes.has(normalizedMain)) errors.push(`${at}.main is duplicated in this month: ${normalizedMain}.`);
+    if (mainDishes.has(normalizedMain)) warnings.push(`${at}.main is duplicated in this month: ${normalizedMain}.`);
     mainDishes.add(normalizedMain);
     if (!Array.isArray(change.sides) || change.sides.length !== 2 || change.sides.some((side) => !String(side).trim()))
       errors.push(`${at}.sides must contain exactly two named side dishes.`);
@@ -683,17 +705,17 @@ function validateMonth(payload, month, allowExisting = false) {
     for (const change of batch.slice(1)) {
       const signature = change.sides.map(normalizeName).sort().join("|");
       if (signature !== expectedSignature)
-        errors.push(
+        warnings.push(
           `Side dishes must stay the same for the 3-day batch ${batch[0].date} through ${batch.at(-1).date}.`,
         );
     }
     if (usedSidePairs.has(expectedSignature))
-      errors.push(
+      warnings.push(
         `Side dish pair '${expectedSides.join(" + ")}' is reused in separate monthly batches (${usedSidePairs.get(expectedSignature)} and ${batch[0].date}).`,
       );
     else usedSidePairs.set(expectedSignature, batch[0].date);
     if (previousSidePairs.has(expectedSignature))
-      errors.push(
+      warnings.push(
         `Side dish pair '${expectedSides.join(" + ")}' repeats the previous month.`,
       );
     for (const side of expectedSides) {
@@ -701,7 +723,7 @@ function validateMonth(payload, month, allowExisting = false) {
       batchDates.push(batch[0].date);
       sideDishBatches.set(side, batchDates);
       if (batchDates.length > 3)
-        errors.push(
+        warnings.push(
           `Side dish '${side}' is used in more than three monthly batches (${batchDates.join(", ")}).`,
         );
     }
@@ -714,12 +736,12 @@ function validateMonth(payload, month, allowExisting = false) {
     ).length;
     const requiredNewSideCount = Math.ceil(currentSides.length * 0.4);
     if (newSideCount < requiredNewSideCount)
-      errors.push(
+      warnings.push(
         `At least 40% of unique side dishes must be new compared with ${previousMonth} (${newSideCount}/${currentSides.length}, requires ${requiredNewSideCount}).`,
       );
     for (const [side, dates] of sideDishBatches)
       if ((previousSideDishBatches.get(side) ?? 0) >= 2 && dates.length > 1)
-        errors.push(
+        warnings.push(
           `Side dish '${side}' appeared in multiple ${previousMonth} batches and may be used in only one ${selectedMonth} batch (${dates.join(", ")}).`,
         );
   }
@@ -728,8 +750,8 @@ function validateMonth(payload, month, allowExisting = false) {
     errors.push(`${selectedMonth} already has ${existing.length} saved meal plans and will not be overwritten.`);
   const previousMains = new Set(db.prepare('SELECT "mainDish" FROM "MealPlan" WHERE "monthKey"=?').all(previousMonth).map((row) => row.mainDish ? normalizeName(row.mainDish) : "").filter(Boolean));
   for (const main of mainDishes)
-    if (previousMains.has(main)) errors.push(`main dish '${main}' repeats the previous month.`);
-  return { valid: errors.length === 0, month: selectedMonth, errors, counts: { mealChanges: changes.length } };
+    if (previousMains.has(main)) warnings.push(`main dish '${main}' repeats the previous month.`);
+  return { valid: errors.length === 0, month: selectedMonth, errors, warnings, counts: { mealChanges: changes.length } };
 }
 
 function previousMonthKey(month) {
@@ -1172,10 +1194,10 @@ function publishMonth(payload, month, requestId = null) {
         now,
       );
     }
-    const summary = JSON.stringify({ mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, month: selectedMonth, replaced: Boolean(existingCount), replaceFrom });
+    const summary = JSON.stringify({ mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, month: selectedMonth, replaced: Boolean(existingCount), replaceFrom, warnings: validation.warnings });
     db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?').run("COMPLETED", summary, Date.now(), jobId);
     db.exec("COMMIT");
-    printJson({ success: true, jobId, month: selectedMonth, mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, replaced: Boolean(existingCount), replaceFrom });
+    printJson({ success: true, jobId, month: selectedMonth, mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, replaced: Boolean(existingCount), replaceFrom, warnings: validation.warnings });
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}
     db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", String(error.message ?? error), Date.now(), jobId);
@@ -1199,9 +1221,9 @@ function publishWeek(
   const now = Date.now();
   const action = payload.mealChanges?.length
     ? "UPDATE_AND_PUBLISH_WEEK"
-    : rebuildShopping
-      ? "PUBLISH_WEEK"
-      : "PUBLISH_RECIPES";
+    : command === "publish-recipes"
+      ? "PUBLISH_RECIPES"
+      : "PUBLISH_WEEK";
   const jobId = beginAgentJob({
     prefix: "agent-job",
     requestId,
@@ -1322,6 +1344,7 @@ function publishWeek(
       mealChanges: payload.mealChanges?.length ?? 0,
       recipes: payload.recipes.length,
       shoppingItems,
+      warnings: validation.warnings,
       backup: backupPath,
     });
     db.prepare(
@@ -1336,6 +1359,7 @@ function publishWeek(
       mealChanges: payload.mealChanges?.length ?? 0,
       recipes: payload.recipes.length,
       shoppingItems,
+      warnings: validation.warnings,
     });
   } catch (error) {
     try {
@@ -1403,7 +1427,7 @@ function publishDay(payload, weekStart, date, requestId = null) {
       )
       .all(`%${weekStart}%`, `%${date}%`);
     const unlink = db.prepare(
-      'UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=?',
+      'UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=? AND "date"=?',
     );
     const trimDates = db.prepare(
       'UPDATE "Recipe" SET "plannedDates"=?,"updatedAt"=? WHERE "id"=?',
@@ -1413,7 +1437,7 @@ function publishDay(payload, weekStart, date, requestId = null) {
       const dates = parseJsonList(recipe.plannedDates).filter(
         (value) => value !== date,
       );
-      unlink.run(recipe.id);
+      unlink.run(recipe.id, toMillis(date));
       if (dates.length) trimDates.run(JSON.stringify(dates), now, recipe.id);
       else deleteRecipe.run(recipe.id);
     }
@@ -1440,6 +1464,7 @@ function publishDay(payload, weekStart, date, requestId = null) {
       mealChanges: 1,
       recipes: payload.recipes.length,
       shoppingItems: shopping.length,
+      warnings: validation.warnings,
       skippedLegacyRecipes,
       backup: backupPath,
     });
@@ -1456,6 +1481,7 @@ function publishDay(payload, weekStart, date, requestId = null) {
       mealChanges: 1,
       recipes: payload.recipes.length,
       shoppingItems: shopping.length,
+      warnings: validation.warnings,
       skippedLegacyRecipes,
     });
   } catch (error) {
@@ -1669,6 +1695,137 @@ function manageGroceryForChat(payload, weekStart) {
   }
 }
 
+function managePantryForChat(payload) {
+  const operation = String(payload?.operation ?? "upsert");
+  const name = String(payload?.name ?? "").trim();
+  if (!name || name.length > 80) fail("보유 재료 이름은 1~80자여야 합니다.");
+  if (!["upsert", "adjust", "delete"].includes(operation))
+    fail("지원하지 않는 보유 재료 작업입니다.");
+  const current = db
+    .prepare('SELECT * FROM "PantryItem" WHERE "name"=?')
+    .get(name);
+  if (operation !== "upsert" && !current)
+    fail(`보유 재료에서 '${name}'을 찾지 못했습니다.`);
+  const requested = operation === "delete" ? null : Number(payload?.quantity);
+  if (operation !== "delete" && !Number.isFinite(requested))
+    fail("보유 재료 수량은 숫자여야 합니다.");
+  const quantity = operation === "delete"
+    ? null
+    : operation === "adjust"
+      ? Number(current.quantity) + requested
+      : requested;
+  if (quantity !== null && (quantity < 0 || quantity > 1_000_000))
+    fail("보유 재료 수량은 0 이상 1,000,000 이하여야 합니다.");
+  const unit = operation === "delete"
+    ? null
+    : String(payload?.unit ?? current?.unit ?? "").trim();
+  if (unit !== null && (!unit || unit.length > 12))
+    fail("보유 재료 단위가 필요합니다.");
+  const expiresAt = operation === "delete"
+    ? null
+    : payload?.expiresAt
+      ? toMillis(String(payload.expiresAt))
+      : payload?.expiresAt === ""
+        ? null
+        : current?.expiresAt ?? null;
+  if (operation !== "delete" && payload?.expiresAt && Number.isNaN(expiresAt))
+    fail("소비기한은 YYYY-MM-DD 형식이어야 합니다.");
+  const backupPath = backupDatabase("pantry");
+  const now = Date.now();
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    if (operation === "delete") {
+      db.prepare('DELETE FROM "PantryItem" WHERE "name"=?').run(name);
+    } else {
+      db.prepare(
+        `INSERT INTO "PantryItem" ("id","name","quantity","unit","category","expiresAt","updatedAt")
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT("name") DO UPDATE SET "quantity"=excluded."quantity","unit"=excluded."unit","category"=excluded."category","expiresAt"=excluded."expiresAt","updatedAt"=excluded."updatedAt"`,
+      ).run(
+        current?.id ?? `pantry-${crypto.createHash("sha1").update(name).digest("hex").slice(0, 16)}`,
+        name,
+        quantity,
+        unit,
+        String(payload?.category ?? current?.category ?? "기타").trim().slice(0, 40) || "기타",
+        expiresAt,
+        now,
+      );
+    }
+    db.exec("COMMIT");
+    printJson({ success: true, operation, name, backup: backupPath });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+}
+
+function manageFamilyForChat(payload) {
+  const role = String(payload?.role ?? "");
+  if (!["father", "mother", "child"].includes(role))
+    fail("가족 역할은 father, mother, child 중 하나여야 합니다.");
+  const current = db
+    .prepare('SELECT * FROM "FamilyMember" WHERE "role"=? LIMIT 1')
+    .get(role);
+  if (!current) fail(`${role} 가족 정보를 찾지 못했습니다.`);
+  const allowed = ["name", "allergies", "chewingAbility", "spiceTolerance", "dietaryNotes"];
+  if (!allowed.some((key) => Object.hasOwn(payload, key)))
+    fail("변경할 가족 정보가 없습니다.");
+  const value = (key) =>
+    Object.hasOwn(payload, key)
+      ? String(payload[key] ?? "").trim() || null
+      : current[key];
+  const backupPath = backupDatabase("family");
+  db.prepare(
+    'UPDATE "FamilyMember" SET "name"=?,"allergies"=?,"chewingAbility"=?,"spiceTolerance"=?,"dietaryNotes"=? WHERE "id"=?',
+  ).run(
+    value("name") ?? current.name,
+    value("allergies") ?? "",
+    value("chewingAbility"),
+    value("spiceTolerance"),
+    value("dietaryNotes"),
+    current.id,
+  );
+  printJson({ success: true, role, backup: backupPath });
+}
+
+function manageReviewForChat(payload, weekStart) {
+  const selectedWeek = requireWeek(weekStart);
+  const current = db
+    .prepare('SELECT * FROM "WeeklyReview" WHERE "weekStart"=?')
+    .get(toMillis(selectedWeek));
+  const referenceDate = String(
+    payload?.referenceDate ??
+      (current?.referenceDate ? formatKst(current.referenceDate) : selectedWeek),
+  );
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(referenceDate) ||
+    referenceDate < selectedWeek ||
+    referenceDate > addDays(selectedWeek, 6)
+  ) fail("주간 점검 기준일은 선택한 주 안에 있어야 합니다.");
+  const backupPath = backupDatabase("weekly-review");
+  const now = Date.now();
+  const id = `weekly-review-${selectedWeek}`;
+  const reviewValue = (key) =>
+    Object.hasOwn(payload ?? {}, key) && payload[key] !== null
+      ? String(payload[key] ?? "").trim() || null
+      : current?.[key] ?? null;
+  db.prepare(
+    `INSERT INTO "WeeklyReview" ("id","weekStart","referenceDate","wantedFoods","avoidFoods","note","createdAt","updatedAt")
+     VALUES (?,?,?,?,?,?,?,?)
+     ON CONFLICT("weekStart") DO UPDATE SET "referenceDate"=excluded."referenceDate","wantedFoods"=excluded."wantedFoods","avoidFoods"=excluded."avoidFoods","note"=excluded."note","updatedAt"=excluded."updatedAt"`,
+  ).run(
+    id,
+    toMillis(selectedWeek),
+    toMillis(referenceDate),
+    reviewValue("wantedFoods"),
+    reviewValue("avoidFoods"),
+    reviewValue("note"),
+    now,
+    now,
+  );
+  printJson({ success: true, weekStart: selectedWeek, referenceDate, backup: backupPath });
+}
+
 function updateAttendanceForChat(payload, date) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? "") || Number.isNaN(toMillis(date)))
     fail("--date must be YYYY-MM-DD.");
@@ -1695,7 +1852,7 @@ function updateAttendanceForChat(payload, date) {
     const upsert = db.prepare(
       `INSERT INTO "FamilySchedule" ("id","date","memberId","isWorking","eatsAtCompany","isAway","lunchNotAtHome","dinnerNotAtHome","note")
        VALUES (?,?,?,?,?,?,?,?,?)
-       ON CONFLICT("date","memberId") DO UPDATE SET "lunchNotAtHome"=excluded."lunchNotAtHome","dinnerNotAtHome"=excluded."dinnerNotAtHome"`,
+       ON CONFLICT("date","memberId") DO UPDATE SET "isWorking"=excluded."isWorking","eatsAtCompany"=excluded."eatsAtCompany","isAway"=excluded."isAway","lunchNotAtHome"=excluded."lunchNotAtHome","dinnerNotAtHome"=excluded."dinnerNotAtHome","note"=excluded."note"`,
     );
     for (const item of attendance) {
       const role = String(item?.role ?? "");
@@ -1712,16 +1869,31 @@ function updateAttendanceForChat(payload, date) {
         typeof item.dinnerNotAtHome === "boolean"
           ? item.dinnerNotAtHome
           : Boolean(current?.dinnerNotAtHome);
+      const isWorking =
+        typeof item.isWorking === "boolean"
+          ? item.isWorking
+          : Boolean(current?.isWorking);
+      const eatsAtCompany =
+        typeof item.eatsAtCompany === "boolean"
+          ? item.eatsAtCompany
+          : Boolean(current?.eatsAtCompany);
+      const isAway =
+        typeof item.isAway === "boolean"
+          ? item.isAway
+          : Boolean(current?.isAway);
+      const note = Object.hasOwn(item, "note")
+        ? String(item.note ?? "").trim() || null
+        : current?.note ?? null;
       upsert.run(
         current?.id ?? `schedule-${role}-${date}`,
         toMillis(date),
         member.id,
-        current?.isWorking ?? 0,
-        current?.eatsAtCompany ?? 0,
-        current?.isAway ?? 0,
+        isWorking ? 1 : 0,
+        eatsAtCompany ? 1 : 0,
+        isAway ? 1 : 0,
         lunchNotAtHome ? 1 : 0,
         dinnerNotAtHome ? 1 : 0,
-        current?.note ?? null,
+        note,
       );
     }
     db.exec("COMMIT");
@@ -1896,7 +2068,7 @@ try {
     publishWeek(
       readPayload(flags.input),
       requireWeek(flags.week),
-      false,
+      true,
       flags["request-id"],
     );
   if (command === "validate-day") {
@@ -1928,6 +2100,12 @@ try {
     );
   if (command === "manage-grocery")
     manageGroceryForChat(readPayload(flags.input), requireWeek(flags.week));
+  if (command === "manage-pantry")
+    managePantryForChat(readPayload(flags.input));
+  if (command === "manage-family")
+    manageFamilyForChat(readPayload(flags.input));
+  if (command === "manage-review")
+    manageReviewForChat(readPayload(flags.input), requireWeek(flags.week));
   if (command === "update-attendance")
     updateAttendanceForChat(readPayload(flags.input), flags.date);
   if (command === "reply-chat") replyChat(readPayload(flags.input), flags.id);

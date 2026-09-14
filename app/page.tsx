@@ -114,7 +114,7 @@ const INITIAL_CHAT_MESSAGES: ChatMessage[] = [
   {
     role: "assistant",
     content:
-      "식단을 물어보거나 직접 관리해 보세요. 날짜와 대상을 정확히 적으면 식단 생성·수정, 레시피 추가·삭제, 장보기와 식사 일정까지 반영할 수 있어요.",
+      "식단을 물어보거나 직접 관리해 보세요. 식단·레시피·장보기뿐 아니라 냉장고 재료, 가족 식사 정보, 일정과 주간 점검도 날짜와 대상을 적어 요청할 수 있어요.",
   },
 ];
 type WeeklyReviewRequest = {
