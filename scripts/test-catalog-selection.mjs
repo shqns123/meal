@@ -15,6 +15,7 @@ const selected = chooseCatalogMenu({
   seed: "same-variant-cooldown",
 });
 assert.notEqual(selected.variantName, "앞다리살제육볶음", "같은 세부 메뉴는 30일 동안 선택하지 않는다.");
+assert.equal(selected.baseName, "닭갈비", "다른 기본메뉴가 있으면 14일 이내 같은 기본메뉴는 후보에서 제외한다.");
 
 const metadata = menuMetadata({ sourceCategory: "메인반찬", baseName: "갈치조림", variantName: "무갈치조림" });
 assert.equal(metadata.cookingFamily, "조림");
@@ -63,10 +64,33 @@ for (let index = 0; index < 160; index += 1) {
   if (chooseCatalogMenu({ ...options, history: recentBoiledPork }).similarGroup === "삶은 돼지고기") recentBoiledPorkPicks += 1;
   if (chooseCatalogMenu({ ...options, history: [] }).similarGroup === "삶은 돼지고기") baselineBoiledPorkPicks += 1;
 }
-assert.ok(recentBoiledPorkPicks < baselineBoiledPorkPicks / 3,
-  `최근 수육 이후 보쌈도 같은 계열로 감점해야 한다 (${recentBoiledPorkPicks}/${baselineBoiledPorkPicks}).`);
+assert.equal(recentBoiledPorkPicks, 0,
+  "다른 기본메뉴가 있으면 최근 8일 이내 유사메뉴그룹은 후보에서 제외한다.");
 assert.ok(chooseCatalogMenu({ catalog: similarCatalog.slice(0, 1), history: recentBoiledPork,
   sourceCategories: ["메인반찬"], date: "2026-09-15", seed: "only-candidate" }),
 "후보가 한 개뿐이어도 최근 사용 메뉴를 약하게 재허용해 생성이 멈추지 않는다.");
 
 console.log("catalog selection checks passed");
+
+const sideCatalog = flattenCatalog([
+  { sourceCategory: "밑반찬", baseName: "감자조림", variantName: "간장감자조림" },
+  { sourceCategory: "밑반찬", baseName: "어묵볶음", variantName: "간장어묵볶음" },
+]);
+const sideChoice = chooseCatalogMenu({ catalog: sideCatalog, sourceCategories: ["밑반찬"], date: "2026-09-10", seed: "side-family", history: [{date:"2026-09-07", ...sideCatalog[0]}] });
+assert.equal(sideChoice.cookingFamily, "볶음", "새 부찬 묶음은 최근 6일의 같은 조리계열을 피한다.");
+
+const sideDistributionCatalog = flattenCatalog([
+  {sourceCategory:"밑반찬",baseName:"시금치나물",variantName:"시금치나물"},
+  {sourceCategory:"밑반찬",baseName:"감자조림",variantName:"감자조림"},
+  {sourceCategory:"밑반찬",baseName:"어묵볶음",variantName:"어묵볶음"},
+  {sourceCategory:"밑반찬",baseName:"오이무침",variantName:"오이무침"},
+]);
+const repeatedSideHistory = ["2026-08-28","2026-09-01","2026-09-03"].map((date) => ({date,...sideDistributionCatalog[0]}));
+let repeatedFamily = 0; let freshFamily = 0;
+for (let index=0; index<120; index+=1) { const item=chooseCatalogMenu({catalog:sideDistributionCatalog,history:repeatedSideHistory,sourceCategories:["밑반찬"],date:"2026-09-10",seed:`distribution-${index}`}); if (item.cookingFamily === "무침") repeatedFamily += 1; else freshFamily += 1; }
+assert.ok(repeatedFamily < freshFamily, "최근 묶음에서 자주 나온 부찬 계열은 아직 안 나온 계열보다 낮은 확률이어야 한다.");
+
+const coverageCatalog = flattenCatalog([
+  {sourceCategory:"메인반찬",baseName:"A",variantName:"A1"},{sourceCategory:"메인반찬",baseName:"B",variantName:"B1"},{sourceCategory:"메인반찬",baseName:"C",variantName:"C1"},{sourceCategory:"메인반찬",baseName:"D",variantName:"D1"},
+]);
+assert.ok(chooseCatalogMenu({catalog:coverageCatalog,sourceCategories:["메인반찬"],date:"2026-09-10",seed:"coverage",history:[{date:"2026-09-01",...coverageCatalog[0]},{date:"2026-09-01",...coverageCatalog[1]}]}), "세부메뉴 제외 비율이 25%를 넘으면 생성이 멈추지 않고 낮은 가중치로 완화한다.");

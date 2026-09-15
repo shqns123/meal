@@ -301,16 +301,13 @@ export default function Home() {
     setSelectedWeek(sundayFor(today));
     setTodayScrollRequest((request) => request + 1);
   };
-  const editDay = (date: string) => {
-    const weekStart = sundayFor(date);
-    setSelectedDate(null);
-    setSelectedWeek(weekStart);
-    setAgentRequest({
-      action: "UPDATE_DAY",
-      date,
-      weekStart,
-      prompt: `${date} 식단만 날짜 상세의 식사 여부와 보유 재료에 맞게 검토해줘. 변경이 필요하면 그 날짜의 주찬·부찬(주말이면 점심 포함) 레시피와 장보기만 검증 후 반영하고, 다른 날짜는 건드리지 마.`,
-    });
+  const editDay = async (date: string, slot: "main" | "side-0" | "side-1" | "all" = "all") => {
+    if (!window.confirm(`${date} 식단을 카탈로그 선택기로 다시 고를까요?`)) return;
+    setSelectedWeek(sundayFor(date));
+    const response = await fetch("/api/catalog-meal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "day", date, slot: slot === "all" ? undefined : slot }) });
+    const data = await response.json();
+    setAppNotice(response.ok ? data.message : (data.error ?? "일일 식단 생성에 실패했습니다."));
+    if (response.ok) setRefreshVersion((version) => version + 1);
   };
   const changeMonth = (amount: number) => {
     const next = shiftMonth(selectedMonth, amount);
@@ -460,6 +457,19 @@ export default function Home() {
               meals={mealItems}
               onOpenDay={openDay}
               onEditDay={editDay}
+              onGenerateCatalogWeek={async () => {
+                if (!window.confirm("이번 주 식단을 카탈로그 선택기로 다시 구성할까요?")) return;
+                const response = await fetch("/api/catalog-meal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "week", date: currentKstDate() }) });
+                const data = await response.json(); setAppNotice(response.ok ? data.message : (data.error ?? "주간 식단 생성에 실패했습니다.")); if (response.ok) setRefreshVersion((version) => version + 1);
+              }}
+              onGenerateCatalogMonth={async () => {
+                if (mealItems.some((meal) => meal.date.startsWith(selectedMonth)) && !window.confirm(`${selectedMonth} 식단을 카탈로그 선택기로 다시 구성할까요?`)) return;
+                setAppNotice(null);
+                const response = await fetch("/api/catalog-meal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ month: selectedMonth, replace: mealItems.some((meal) => meal.date.startsWith(selectedMonth)) }) });
+                const data = await response.json();
+                setAppNotice(response.ok ? data.message : (data.error ?? "월간 식단 생성에 실패했습니다."));
+                if (response.ok) setRefreshVersion((version) => version + 1);
+              }}
             />
           )}
           {active === "레시피" && (
@@ -520,7 +530,7 @@ export default function Home() {
         <DayDetailModal
           date={selectedDate}
           close={() => setSelectedDate(null)}
-          onEdit={() => editDay(selectedDate)}
+          onRefresh={(slot) => editDay(selectedDate, slot)}
         />
       )}
       {agentRequest && (
@@ -813,6 +823,8 @@ function MealPlanner({
   meals,
   onOpenDay,
   onEditDay,
+  onGenerateCatalogMonth,
+  onGenerateCatalogWeek,
 }: {
   view: "month" | "week";
   setView: (v: "month" | "week") => void;
@@ -824,6 +836,8 @@ function MealPlanner({
   meals: Meal[];
   onOpenDay: (date: string) => void;
   onEditDay: (date: string) => void;
+  onGenerateCatalogMonth: () => Promise<void>;
+  onGenerateCatalogWeek: () => Promise<void>;
 }) {
   const weekDays = buildWeekDays(weekStart);
   const periodLabel =
@@ -884,18 +898,13 @@ function MealPlanner({
               </button>
             )}
           </div>
-          {view === "month" && (
-            <div className="ml-auto">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={onGoToday}
-                className="h-11 px-3 lg:hidden"
-              >
-                오늘
-              </Button>
-            </div>
-          )}
+          <div className="ml-auto flex items-center gap-2">
+            {view === "week" && <Button type="button" onClick={() => void onGenerateCatalogWeek()} className="grid h-11 w-11 place-items-center p-0" aria-label="이번 주 카탈로그로 다시 구성" title="이번 주 카탈로그로 다시 구성"><RefreshCw size={16} aria-hidden="true" /></Button>}
+          {view === "month" && <>
+            <Button type="button" onClick={() => void onGenerateCatalogMonth()} className="grid h-11 w-11 place-items-center p-0" aria-label="이번 달 카탈로그로 다시 구성" title="이번 달 카탈로그로 다시 구성"><RefreshCw size={16} aria-hidden="true" /></Button>
+            <Button type="button" variant="outline" onClick={onGoToday} className="h-11 px-3 lg:hidden">오늘</Button>
+          </>}
+          </div>
         </div>
         {view === "month" ? (
           <>
@@ -1860,11 +1869,11 @@ function WeeklyReviewSettings({
 function DayDetailModal({
   date,
   close,
-  onEdit,
+  onRefresh,
 }: {
   date: string;
   close: () => void;
-  onEdit: () => void;
+  onRefresh: (slot: "main" | "side-0" | "side-1") => Promise<void>;
 }) {
   const [detail, setDetail] = useState<DayDetail | null>(null);
   const [saving, setSaving] = useState(false);
@@ -1982,15 +1991,9 @@ function DayDetailModal({
                     <span className="text-black/55">점심</span> ·{" "}
                     {detail.meal.lunch ?? "계획 없음"}
                   </p>
-                  <p className="font-medium">
-                    {detail.meal.mealStyle === "SOUP_MEAL" ? "간단한 주찬" : ["NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"].includes(detail.meal.mealStyle ?? "") ? "한그릇" : "주찬"} · {detail.meal.main ?? "계획 없음"}
-                  </p>
+                  <div className="flex items-center gap-1 font-medium"><span>{detail.meal.mealStyle === "SOUP_MEAL" ? "간단한 주찬" : ["NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"].includes(detail.meal.mealStyle ?? "") ? "한그릇" : "주찬"} · {detail.meal.main ?? "계획 없음"}</span><button type="button" onClick={() => void onRefresh("main").then(load)} className="grid h-7 w-7 place-items-center rounded-md text-black/45 hover:bg-white hover:text-[#0075de]" aria-label="주찬 다시 고르기" title="주찬 다시 고르기"><RefreshCw size={14} /></button></div>
                   {detail.meal.soup && <p className="text-black/70">국/탕/찌개 · {detail.meal.soup}</p>}
-                  {detail.meal.sides.map((side) => (
-                    <p key={side} className="text-black/70">
-                      부찬 · {side}
-                    </p>
-                  ))}
+                  <div className="space-y-1 text-black/70">{detail.meal.sides.map((side, index) => <div key={side} className="flex items-center gap-1"><span>부찬 · {side}</span><button type="button" onClick={() => void onRefresh(index === 0 ? "side-0" : "side-1").then(load)} className="grid h-7 w-7 place-items-center rounded-md text-black/45 hover:bg-white hover:text-[#0075de]" aria-label={`${side} 다시 고르기`} title={`${side} 다시 고르기`}><RefreshCw size={14} /></button></div>)}</div>
                   {detail.meal.baby && (
                     <p className="text-black/70">아기 · {detail.meal.baby}</p>
                   )}
@@ -2012,14 +2015,7 @@ function DayDetailModal({
                 </p>
               )}
             </section>
-            <Button
-              variant="outline"
-              onClick={onEdit}
-              className="mt-3 h-11 w-full gap-2"
-            >
-              <Pencil size={16} aria-hidden="true" />
-              일일 식단 수정
-            </Button>
+
             <section className="mt-4 rounded-xl border border-black/[.08]">
               <div className="border-b border-black/[.08] p-4">
                 <h3 className="font-semibold">집에서 먹지 않는 끼니</h3>

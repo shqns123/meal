@@ -23,6 +23,8 @@ if (
   ![
     "context",
     "context-month",
+    "generate-catalog-month",
+    "generate-catalog-day",
     "refresh-dish-history",
     "validate-week",
     "validate-month",
@@ -256,7 +258,7 @@ function reusableRecipesForPlans(mealRows) {
   return reusable;
 }
 
-function loadContext(weekStart) {
+function loadContext(weekStart, seedSalt = "") {
   const weekEnd = addDays(weekStart, 6);
   const startMs = toMillis(weekStart);
   const endExclusiveMs = toMillis(addDays(weekStart, 7));
@@ -274,7 +276,7 @@ function loadContext(weekStart) {
     dates: mealRows.map((meal) => formatKst(meal.date)),
     history: catalogHistory(catalogItems, recentRows),
     month: weekStart,
-    usage: catalogUsage(),
+    usage: catalogUsage(), seedSalt,
     styles: new Map(mealRows.map((meal) => [formatKst(meal.date), meal.mealStyle])),
   });
   const schedules = db
@@ -398,7 +400,7 @@ function loadContext(weekStart) {
   };
 }
 
-function loadMonthContext(month) {
+function loadMonthContext(month, seedSalt = "") {
   const selectedMonth = requireMonth(month);
   const dates = monthDates(selectedMonth);
   const start = dates[0];
@@ -411,7 +413,7 @@ function loadMonthContext(month) {
   const schedules = db.prepare('SELECT s."date",s."isWorking",s."eatsAtCompany",s."isAway",s."lunchNotAtHome",s."dinnerNotAtHome",s."note",m."name" AS "memberName",m."role" AS "memberRole" FROM "FamilySchedule" s JOIN "FamilyMember" m ON m."id"=s."memberId" WHERE s."date">=? AND s."date"<? ORDER BY s."date"').all(toMillis(start), toMillis(endExclusive));
   const catalogItems = loadCatalogItems();
   const planningHistory = catalogHistory(catalogItems, [...recentMeals, ...previousMeals]);
-  const selectionPreview = catalogSelectionPreview({ catalog: catalogItems, dates, history: planningHistory, month: selectedMonth, usage: catalogUsage() });
+  const selectionPreview = catalogSelectionPreview({ catalog: catalogItems, dates, history: planningHistory, month: selectedMonth, usage: catalogUsage(), seedSalt });
   const previewDiversity = assessMealDiversity({
     plans: selectionPreview.map((item) => ({
       date: item.date, mealStyle: item.mealStyle,
@@ -913,7 +915,9 @@ function catalogHistory(items, meals) {
 }
 function isCatalogItemAllowed(item) {
   const nonMealPatterns = /양념장|소스|드레싱|카나페|도시락|도시락반찬|만들기팁|보관법/;
+  const sideMealPatterns = /(?:볶음)?밥|덮밥|김밥|죽|국수|우동|칼국수|수제비|라면|파스타|떡볶이/;
   return !nonMealPatterns.test(item.variantName)
+    && !(item.sourceCategory === "밑반찬" && sideMealPatterns.test(item.variantName))
     && !banned.some((ingredient) => ingredient && item.variantName.includes(ingredient));
 }
 function weeklyAvoidForDate(date) {
@@ -952,20 +956,52 @@ function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage,
   }
   return { main, soup, sides };
 }
-function mealStyleForDate(date) {
-  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
-  if (weekday === 0) return "RICE_PORRIDGE_TTEOK";
-  if (weekday === 4) return "SOUP_MEAL";
-  if (weekday === 6) return "NOODLE_DUMPLING";
-  return "MAIN_DISH";
+function seededPlanRandom(seed) {
+  let value = 2166136261;
+  for (const char of String(seed)) value = Math.imul(value ^ char.charCodeAt(0), 16777619);
+  return () => ((value = Math.imul(value ^ (value >>> 13), 1274126177)) >>> 0) / 4294967296;
 }
-function catalogSelectionPreview({ catalog, dates, history, month, usage, styles = new Map() }) {
+function shuffled(values, seed) {
+  const result = [...values]; const random = seededPlanRandom(seed);
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const target = Math.floor(random() * (index + 1)); [result[index], result[target]] = [result[target], result[index]];
+  }
+  return result;
+}
+function generatedMealStyles(dates, month, overrides = new Map()) {
+  const output = new Map(overrides); const byWeek = new Map();
+  for (const date of dates) { const week = sundayFor(date); const list = byWeek.get(week) ?? []; list.push(date); byWeek.set(week, list); }
+  const lastWeekdayStyles = new Map();
+  for (const [week, weekDates] of byWeek) {
+    const pending = weekDates.filter((date) => !output.has(date));
+    const n = pending.length;
+    const pool = n >= 7 ? ["MAIN_DISH","MAIN_DISH","MAIN_DISH","MAIN_DISH","SOUP_MEAL","NOODLE_DUMPLING","RICE_PORRIDGE_TTEOK"]
+      : n === 6 ? ["MAIN_DISH","MAIN_DISH","MAIN_DISH","SOUP_MEAL","NOODLE_DUMPLING","RICE_PORRIDGE_TTEOK"]
+      : n === 5 ? ["MAIN_DISH","MAIN_DISH","MAIN_DISH","SOUP_MEAL","NOODLE_DUMPLING"]
+      : n === 4 ? ["MAIN_DISH","MAIN_DISH","SOUP_MEAL","NOODLE_DUMPLING"]
+      : Array(n).fill("MAIN_DISH");
+    const assigned = shuffled(pool, `${month}:${week}`);
+    pending.forEach((date, index) => output.set(date, assigned[index]));
+    // 같은 요일에 매주 같은 식사형태가 고정되지 않도록 가능한 경우 교환한다.
+    for (const date of pending) {
+      const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+      if (lastWeekdayStyles.get(weekday) !== output.get(date)) continue;
+      const swap = pending.find((other) => other !== date && output.get(other) !== output.get(date)
+        && lastWeekdayStyles.get(new Date(`${other}T00:00:00Z`).getUTCDay()) !== output.get(date));
+      if (swap) { const value = output.get(date); output.set(date, output.get(swap)); output.set(swap, value); }
+    }
+    for (const date of weekDates) lastWeekdayStyles.set(new Date(`${date}T00:00:00Z`).getUTCDay(), output.get(date));
+  }
+  return output;
+}
+function catalogSelectionPreview({ catalog, dates, history, month, usage, styles = new Map(), seedSalt = "" }) {
   const evolvingHistory = [...history];
+  const generatedStyles = generatedMealStyles(dates, month, styles);
   let sidePair = null;
   return dates.map((date, index) => {
-    const mealStyle = styles.get(date) || mealStyleForDate(date);
+    const mealStyle = generatedStyles.get(date);
     const selectSides = index % 3 === 0 || !sidePair;
-    const selection = selectionForMealStyle({ catalog, history: evolvingHistory, date, mealStyle, seed: `${month}:${date}`, usage, pickSides: selectSides });
+    const selection = selectionForMealStyle({ catalog, history: evolvingHistory, date, mealStyle, seed: `${month}:${date}:${seedSalt}`, usage, pickSides: selectSides });
     if (selectSides) sidePair = selection.sides;
     const withStatus = (item) => item && {
       ...item,
@@ -973,6 +1009,45 @@ function catalogSelectionPreview({ catalog, dates, history, month, usage, styles
     };
     return { date, mealStyle, main: withStatus(selection.main), soup: withStatus(selection.soup), sides: (sidePair ?? []).map(withStatus) };
   });
+}
+function generateCatalogDay(date, slot = "all", seedSalt = "") {
+  const week = sundayFor(date); const current = loadContext(week, seedSalt);
+  const selection = current.menuCatalog.selectionPreview.find((entry) => entry.date === date);
+  const existing = db.prepare('SELECT "lunchPlan","mainDish","soupDish","mealStyle","sideDishes","cookingNote" FROM "MealPlan" WHERE "date"=?').get(toMillis(date));
+  if (!selection || !existing) fail(`${date}의 식단 또는 카탈로그 후보를 찾지 못했습니다.`);
+  const changedSides = slot.startsWith("side-") ? parseJsonList(existing.sideDishes).map((item, index) => index === Number(slot.slice(5)) ? selection.sides[index]?.name ?? item : item) : null;
+  const makeChange = (targetDate, plan) => ({
+    date: targetDate, lunch: plan.lunchPlan, mealStyle: slot.startsWith("side") ? plan.mealStyle : selection.mealStyle,
+    main: slot.startsWith("side") ? plan.mainDish : selection.main?.name,
+    soup: slot.startsWith("side") ? plan.soupDish : selection.soup?.name ?? null,
+    sides: slot.startsWith("side-") ? parseJsonList(plan.sideDishes).map((item, index) => index === Number(slot.slice(5)) ? changedSides?.[index] ?? item : item) : slot === "main" ? parseJsonList(plan.sideDishes) : selection.sides.map((item) => item.name),
+    note: "카탈로그 세부메뉴 자동 선택",
+  });
+  let changes = [makeChange(date, existing)];
+  if (slot.startsWith("side-")) {
+    const signature = existing.sideDishes;
+    const rows = db.prepare('SELECT "date","lunchPlan","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" ORDER BY "date"').all();
+    const at = rows.findIndex((row) => formatKst(row.date) === date);
+    const batch = [];
+    for (let index = at; index >= 0 && rows[index].sideDishes === signature; index -= 1) batch.unshift(rows[index]);
+    for (let index = at + 1; index < rows.length && rows[index].sideDishes === signature; index += 1) batch.push(rows[index]);
+    changes = batch.map((plan) => makeChange(formatKst(plan.date), plan));
+  }
+  return { schemaVersion: "meal-week.v1", weekStart: week, changeReason: "카탈로그 선택기로 식단을 다시 골랐습니다.", recipes: [], mealChanges: changes };
+}
+function generateCatalogMonth(month, seedSalt = "") {
+  const current = loadMonthContext(month, seedSalt);
+  if (!current.menuCatalog.available) fail(current.menuCatalog.reason || "카탈로그를 읽지 못했습니다.");
+  return {
+    schemaVersion: "meal-month.v1", month,
+    changeReason: "카탈로그 선택기로 월간 식단을 구성했습니다.",
+    mealChanges: current.menuCatalog.selectionPreview.map((selection) => {
+      const weekday = new Date(`${selection.date}T00:00:00Z`).getUTCDay();
+      return { date: selection.date, lunch: weekday === 0 || weekday === 6 ? "주말 간단식" : "회사 식사",
+        mealStyle: selection.mealStyle, main: selection.main?.name, soup: selection.soup?.name ?? null,
+        sides: selection.sides.map((item) => item.name), note: "카탈로그 세부메뉴 자동 선택" };
+    }), recipes: [],
+  };
 }
 function catalogContext({ items = null, selectionPreview = [], previewDiversity = null } = {}) {
   const catalogItems = items ?? loadCatalogItems();
@@ -2460,6 +2535,8 @@ fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Auth
 try {
   if (command === "context") printJson(loadContext(requireWeek(flags.week)));
   if (command === "context-month") printJson(loadMonthContext(requireMonth(flags.month)));
+  if (command === "generate-catalog-month") printJson(generateCatalogMonth(requireMonth(flags.month), flags.salt));
+  if (command === "generate-catalog-day") printJson(generateCatalogDay(flags.date, flags.slot, flags.salt));
   if (command === "refresh-dish-history") refreshDishHistory();
   if (command === "validate-week") {
     const payload = readPayload(flags.input);

@@ -150,6 +150,40 @@ function normalizeMonthPayload(payload, month) {
     month,
   };
 }
+function catalogDinnerForDate(change, current = null) {
+  const contextForDate = current ?? monthContext(String(change?.date || "").slice(0, 7));
+  const selection = (contextForDate?.menuCatalog?.selectionPreview || []).find((entry) => entry.date === change.date);
+  if (!selection) throw new Error(`${change.date}의 카탈로그 메뉴 후보를 읽지 못했습니다.`);
+  const { baby, ...withoutAutoBaby } = change;
+  return {
+    ...withoutAutoBaby,
+    mealStyle: selection.mealStyle,
+    main: selection.main?.name || change.main,
+    soup: selection.soup?.name || null,
+    sides: (selection.sides || []).map((item) => item.name).filter(Boolean),
+    note: [change.note, "카탈로그 세부메뉴 자동 선택"].filter(Boolean).join(" · "),
+  };
+}
+function applyCatalogDinnerSelections(payload, current, fromDate = null) {
+  const preview = new Map((current?.menuCatalog?.selectionPreview || []).map((entry) => [entry.date, entry]));
+  if (!preview.size) throw new Error("카탈로그 메뉴 후보를 읽지 못해 월간 식단을 생성할 수 없습니다.");
+  return {
+    ...payload,
+    mealChanges: (payload?.mealChanges || []).map((change) => {
+      const selection = preview.get(change.date);
+      if (!selection || (fromDate && change.date < fromDate)) return change;
+      const { baby, ...withoutAutoBaby } = change;
+      return {
+        ...withoutAutoBaby,
+        mealStyle: selection.mealStyle,
+        main: selection.main?.name || change.main,
+        soup: selection.soup?.name || null,
+        sides: (selection.sides || []).map((item) => item.name).filter(Boolean),
+        note: [change.note, "카탈로그 세부메뉴 자동 선택"].filter(Boolean).join(" · "),
+      };
+    }),
+  };
+}
 function normalizeMonthSideBatches(payload, fromDate = null) {
   const changes = Array.isArray(payload?.mealChanges)
     ? [...payload.mealChanges].sort((left, right) =>
@@ -488,7 +522,7 @@ async function runChatMonthAction(ruleFiles, decision) {
   const result = await ask(
     systemPrompt(ruleFiles),
     `[월간 컨텍스트]\n${JSON.stringify(current)}\n[사용자 요청]\n${task.message}\n` +
-      `${month}의 모든 날짜를 한 번씩 포함한 meal-month.v1 JSON만 반환한다. ` +
+      `카탈로그 selectionPreview에 제시된 날짜별 저녁(main, soup, sides, mealStyle)은 코드가 최종 적용한다. 그 메뉴명을 바꾸거나 새 메뉴를 창작하지 말고 점심과 일정·메모만 유효하게 작성한다. ${month}의 모든 날짜를 한 번씩 포함한 meal-month.v1 JSON만 반환한다. ` +
       (replaceFrom
         ? `${replaceFrom} 이전 식단은 existingMonthMeals와 완전히 동일하게 유지하고, ${replaceFrom}부터 월말까지만 새로 구성한다. `
         : "") +
@@ -496,12 +530,12 @@ async function runChatMonthAction(ruleFiles, decision) {
     false,
   );
   const scope = `${month}의 모든 날짜를 한 번씩 포함하며 ${replaceFrom ? `${replaceFrom} 이전은 유지하고 그날부터 월말까지만 교체하는` : "월 전체를 교체하는"} 월간 식단이다. 각 날짜에 유효한 mealStyle을 넣고, SOUP_MEAL에는 soup과 간단한 main을 모두 넣는다. AVOID 메뉴는 저장하지 않으며 UNKNOWN 메뉴는 사용할 수 있다. 부찬 조합은 2~3일씩 유지하며 레시피와 장보기는 만들지 않는다.`;
-  const normalizeCandidate = (candidate) => normalizeMonthSideBatches(
-    preserveMonthBefore(
-      normalizeMonthPayload(candidate, month),
-      current,
+  const normalizeCandidate = (candidate) => applyCatalogDinnerSelections(
+    normalizeMonthSideBatches(
+      preserveMonthBefore(normalizeMonthPayload(candidate, month), current, replaceFrom),
       replaceFrom,
     ),
+    current,
     replaceFrom,
   );
   let payload = normalizeCandidate(modelJson(result.content));
@@ -517,7 +551,7 @@ async function runChatMonthAction(ruleFiles, decision) {
     ),
     false,
     6,
-    true,
+    false,
     task.message,
   );
   payload = normalizeCandidate(payload);
@@ -1047,10 +1081,11 @@ async function runPlanner() {
       throw new Error(task.targetMonth + " 월간 식단은 이미 저장되어 있어 덮어쓰지 않습니다.");
     const result = await ask(systemPrompt(ruleFiles),
       "[월간 컨텍스트]\n" + JSON.stringify(current) + "\n[요청]\n" + task.prompt +
-      "\n" + task.targetMonth + "의 모든 날짜를 포함한 meal-month.v1 JSON만 반환한다. 부찬 2개는 같은 조합을 2~3일 연속 유지하며 하루마다 바꾸지 않는다. 레시피·장보기는 만들지 않는다.");
+      "\n카탈로그 selectionPreview의 저녁 메뉴(main, soup, sides, mealStyle)는 코드가 최종 적용한다. 새 저녁 메뉴를 창작하지 말고 점심과 일정·메모만 작성한다. " + task.targetMonth + "의 모든 날짜를 포함한 meal-month.v1 JSON만 반환한다. 부찬 2개는 같은 조합을 2~3일 연속 유지하며 하루마다 바꾸지 않는다. 레시피·장보기는 만들지 않는다.");
     const scope = task.targetMonth + "의 모든 날짜를 한 번씩 포함하고 부찬 조합은 2~3일씩 유지하는 월간 식단이며 레시피와 장보기는 만들지 않는다.";
-    const normalizeCandidate = (candidate) => normalizeMonthSideBatches(
-      normalizeMonthPayload(candidate, task.targetMonth),
+    const normalizeCandidate = (candidate) => applyCatalogDinnerSelections(
+      normalizeMonthSideBatches(normalizeMonthPayload(candidate, task.targetMonth)),
+      current,
     );
     let payload = normalizeCandidate(modelJson(result.content));
     payload = await completePayload(
@@ -1065,7 +1100,7 @@ async function runPlanner() {
       ),
     false,
     6,
-    true,
+    false,
   );
     payload = normalizeCandidate(payload);
     publish("publish-month", writeInput("month-" + task.targetMonth, payload),
@@ -1087,7 +1122,8 @@ async function runPlanner() {
     }
     if (payload.decision !== "change" || !Array.isArray(payload.mealChanges) || !payload.mealChanges.length)
       throw new Error("주간 점검 결과 형식이 올바르지 않습니다.");
-    for (const change of payload.mealChanges) {
+    for (const rawChange of payload.mealChanges) {
+      const change = catalogDinnerForDate(rawChange, current);
       let dayPayload = { schemaVersion: "meal-week.v1", weekStart: task.weekStart,
         changeReason: String(payload.changeReason || "주간 점검 결과 식단을 조정했습니다."),
         mealChanges: [change], recipes: [] };
@@ -1104,7 +1140,7 @@ async function runPlanner() {
         ),
         false,
         6,
-        true,
+        false,
         `${task.prompt || ""}\n${current.weeklyReview?.wantedFoods || ""}`,
       );
       dayPayload.recipes = [];

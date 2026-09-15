@@ -32,7 +32,7 @@ export function MenuPreferences() {
   const [sourceCategory, setSourceCategory] = useState("전체");
   const [method, setMethod] = useState("전체");
   const [ingredient, setIngredient] = useState("전체");
-  const [baseMenu, setBaseMenu] = useState("전체");
+  const [baseMenusSelected, setBaseMenusSelected] = useState<string[]>([]);
   const [filter, setFilter] = useState("ALL");
   const [displayLimit, setDisplayLimit] = useState(PAGE_SIZE);
   const [catalogAvailable, setCatalogAvailable] = useState(true);
@@ -63,8 +63,8 @@ export function MenuPreferences() {
     (sourceCategory === "전체" || match.sourceCategory === sourceCategory) &&
     (method === "전체" || match.cookingMethods.includes(method)) &&
     (ingredient === "전체" || match.ingredientCategories.includes(ingredient)) &&
-    (baseMenu === "전체" || match.baseMenu === baseMenu),
-  ), [sourceCategory, method, ingredient, baseMenu]);
+    (baseMenusSelected.length === 0 || baseMenusSelected.includes(match.baseMenu)),
+  ), [sourceCategory, method, ingredient, baseMenusSelected]);
   const baseMenus = useMemo(() => [...new Set(dishes.flatMap(dish => (dish.catalogMatches ?? [])
     .filter(match => (sourceCategory === "전체" || match.sourceCategory === sourceCategory)
       && (method === "전체" || match.cookingMethods.includes(method))
@@ -75,14 +75,14 @@ export function MenuPreferences() {
       (sourceCategory === "전체" || match.sourceCategory === sourceCategory) &&
       (method === "전체" || match.cookingMethods.includes(method)) &&
       (ingredient === "전체" || match.ingredientCategories.includes(ingredient)) &&
-      (baseMenu === "전체" || match.baseMenu === baseMenu));
+      (baseMenusSelected.length === 0 || baseMenusSelected.includes(match.baseMenu)));
     const query = search.trim();
     return (!query || dish.name.includes(query) || matches.some(item => item.baseMenu.includes(query)))
-      && (sourceCategory === "전체" && method === "전체" && ingredient === "전체" && baseMenu === "전체" || matches.length > 0)
+      && (sourceCategory === "전체" && method === "전체" && ingredient === "전체" && baseMenusSelected.length === 0 || matches.length > 0)
       && (filter === "ALL" || preference(dish).usage === filter);
   });
-  const hasActiveFilter = Boolean(search.trim()) || sourceCategory !== "전체" || method !== "전체" || ingredient !== "전체" || baseMenu !== "전체" || filter !== "ALL";
-  useEffect(() => { setDisplayLimit(PAGE_SIZE); }, [search, sourceCategory, method, ingredient, baseMenu, filter]);
+  const hasActiveFilter = Boolean(search.trim()) || sourceCategory !== "전체" || method !== "전체" || ingredient !== "전체" || baseMenusSelected.length > 0 || filter !== "ALL";
+  useEffect(() => { setDisplayLimit(PAGE_SIZE); }, [search, sourceCategory, method, ingredient, baseMenusSelected, filter]);
   const save = async () => {
     setSaving(true); setError("");
     try { const notice = await savePreferences(Object.values(drafts)); setDrafts({}); await load(); setMessage(notice); }
@@ -93,7 +93,7 @@ export function MenuPreferences() {
     const name = newName.trim().replace(/\s+/g, " "); if (!name) return;
     const dish = {name, category: newCategory, preferences: []};
     setDishes(current => current.some(item => keyFor(item) === keyFor(dish)) ? current : [dish, ...current]);
-    setSearch(name); setSourceCategory("전체"); setMethod("전체"); setIngredient("전체"); setBaseMenu("전체"); setFilter("ALL"); setNewName("");
+    setSearch(name); setSourceCategory("전체"); setMethod("전체"); setIngredient("전체"); setBaseMenusSelected([]); setFilter("ALL"); setNewName("");
     setMessage("후보를 추가했습니다. 식단 사용 여부나 익숙함을 선택한 뒤 저장해 주세요.");
   };
   return <section className="space-y-6">
@@ -105,13 +105,13 @@ export function MenuPreferences() {
         <label className="space-y-2 text-sm">식단 사용<select className={fieldClass} value={filter} onChange={e => setFilter(e.target.value)}><option value="ALL">전체 보기</option>{Object.entries(usageLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       </div>
       <div className="mt-6 space-y-4 border-t border-black/10 pt-5">
-        <CatalogFilterRow label="종류별" options={SOURCE_CATEGORIES} value={sourceCategory} onChange={value => { setSourceCategory(value); setBaseMenu("전체"); }} />
-        <CatalogFilterRow label="방법별" options={METHODS} value={method} onChange={value => { setMethod(value); setBaseMenu("전체"); }} />
-        <CatalogFilterRow label="재료별" options={INGREDIENTS} value={ingredient} onChange={value => { setIngredient(value); setBaseMenu("전체"); }} />
+        <CatalogFilterRow label="종류별" options={SOURCE_CATEGORIES} value={sourceCategory} onChange={value => { setSourceCategory(value); setBaseMenusSelected([]); }} />
+        <CatalogFilterRow label="방법별" options={METHODS} value={method} onChange={value => { setMethod(value); setBaseMenusSelected([]); }} />
+        <CatalogFilterRow label="재료별" options={INGREDIENTS} value={ingredient} onChange={value => { setIngredient(value); setBaseMenusSelected([]); }} />
       </div>
       <div className="mt-5 flex flex-col gap-3 border-t border-black/10 pt-4 sm:flex-row sm:items-end sm:justify-between">
-        <label className="w-full space-y-2 text-sm sm:max-w-xs">기본메뉴 좁히기<select className={fieldClass} value={baseMenu} onChange={e => setBaseMenu(e.target.value)}><option value="전체">전체 기본메뉴</option>{baseMenus.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
-        <button type="button" className="min-h-11 rounded-lg px-3 text-sm text-[#615d59] underline underline-offset-4 hover:text-[#111111] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0075de]" onClick={() => { setSearch(""); setSourceCategory("전체"); setMethod("전체"); setIngredient("전체"); setBaseMenu("전체"); setFilter("ALL"); }}>필터 초기화</button>
+        <BaseMenuChips options={baseMenus} selected={baseMenusSelected} onChange={setBaseMenusSelected} />
+        <button type="button" className="min-h-11 rounded-lg px-3 text-sm text-[#615d59] underline underline-offset-4 hover:text-[#111111] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0075de]" onClick={() => { setSearch(""); setSourceCategory("전체"); setMethod("전체"); setIngredient("전체"); setBaseMenusSelected([]); setFilter("ALL"); }}>필터 초기화</button>
       </div>
       <p className="mt-4 text-sm leading-6 text-[#615d59]">방법·재료 필터는 만개의레시피 카탈로그의 기본메뉴 태그를 기준으로 합니다. 세부메뉴의 실제 레시피 재료와 다를 수 있어요. 함께 먹는 구성원의 기피는 식단 생성에서 제외하며, 여기서 취향을 자동 추정하지 않습니다.</p>
       {!catalogAvailable && <p role="status" className="mt-3 text-sm text-[#b42318]">카탈로그를 읽지 못해 종류·방법·재료 필터의 메뉴를 표시할 수 없습니다. 저장된 우리 집 메뉴는 검색과 식단 사용 필터로 볼 수 있습니다.</p>}
@@ -125,6 +125,10 @@ export function MenuPreferences() {
       <Button disabled={saving || loading || !Object.keys(drafts).length} onClick={() => void save()}>{saving ? "저장 중…" : "선택한 취향 저장"}</Button>
     </div>
   </section>;
+}
+
+function BaseMenuChips({options, selected, onChange}: {options: string[]; selected: string[]; onChange: (values: string[]) => void}) {
+  return <div className="w-full space-y-2"><div className="flex items-center justify-between gap-3"><span className="text-sm">기본메뉴 좁히기</span>{selected.length > 0 && <button type="button" onClick={() => onChange([])} className="text-xs text-[#615d59] underline underline-offset-4 hover:text-[#111111]">선택 해제</button>}</div><div className="flex max-h-48 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-black/10 bg-[#fcfbfa] p-2" role="group" aria-label="기본메뉴 다중 필터">{options.map(option => { const active = selected.includes(option); return <button key={option} type="button" aria-pressed={active} onClick={() => onChange(active ? selected.filter(value => value !== option) : [...selected, option])} className={`min-h-9 rounded-md px-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0075de] ${active ? "bg-[#e6f3fe] font-medium text-[#075f9f]" : "text-[#615d59] hover:bg-white hover:text-[#111111]"}`}>{option}</button>; })}</div>{selected.length > 0 && <p className="text-xs text-[#615d59]">{selected.length}개 선택 · 선택한 기본메뉴의 세부메뉴만 표시합니다.</p>}</div>;
 }
 
 function CatalogFilterRow({label, options, value, onChange}: {label: string; options: string[]; value: string; onChange: (value: string) => void}) {
