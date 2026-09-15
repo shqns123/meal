@@ -15,11 +15,17 @@ const catalogRoles: Record<string, string> = {
 
 function catalogMatches() {
   const matches = new Map<string, CatalogMatch[]>();
-  const catalogPath = process.env.MEAL_CATALOG_DB_PATH ?? join(process.cwd(), "data", "10000recipe-catalog.db");
-  if (!existsSync(catalogPath)) return { matches, available: false };
+  const catalogPath = process.env.MEAL_CATALOG_DB_PATH ?? join(process.env.MEAL_PLAN_ROOT || process.cwd(), "data", "10000recipe-catalog.db");
+  if (!existsSync(catalogPath)) {
+    console.warn(`메뉴 카탈로그 파일이 없습니다: ${catalogPath}`);
+    return { matches, available: false };
+  }
   let catalog: DatabaseSync;
   try { catalog = new DatabaseSync(catalogPath, { readOnly: true }); }
-  catch { return { matches: new Map<string, CatalogMatch[]>(), available: false }; }
+  catch (error) {
+    console.error(`메뉴 카탈로그를 열지 못했습니다: ${catalogPath}`, error);
+    return { matches: new Map<string, CatalogMatch[]>(), available: false };
+  }
   try {
     const rows = catalog.prepare(`SELECT m."sourceCategory",m."name" AS "baseMenu",m."cookingMethods",m."ingredientCategories",v."name" AS "variantName"
       FROM "RecipeCatalogMenu" m LEFT JOIN "RecipeCatalogVariant" v ON v."menuId"=m."id"`).all() as {
@@ -40,7 +46,8 @@ function catalogMatches() {
       }
     }
     return { matches, available: true };
-  } catch {
+  } catch (error) {
+    console.error(`메뉴 카탈로그 내용을 읽지 못했습니다: ${catalogPath}`, error);
     return { matches: new Map<string, CatalogMatch[]>(), available: false };
   } finally {
     catalog.close();

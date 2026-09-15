@@ -26,6 +26,11 @@ docker compose up --build
 
 Docker Compose로 실행한 앱은 `http://localhost:7000`에서 열립니다. SQLite 파일은 호스트의 `./data/mealplan.db`에 생성되므로 NAS 공유 폴더에 이 프로젝트를 두면 식단 데이터도 NAS에 보관됩니다. 컨테이너 시작 시 스키마가 자동 적용됩니다.
 
+만개의레시피 메뉴 카탈로그는 앱에 포함된 초기 파일에서 서버의 `./data/10000recipe-catalog.db`로 첫 실행 시 자동 설치됩니다. `data` 폴더는 Docker 볼륨으로 유지되므로 이후 재시작·재배포에서는 기존 카탈로그를 덮어쓰지 않습니다. 카탈로그를 새로 수집해 초기 파일도 갱신하려면 로컬에서 `npm run import:10000recipe-catalog` 다음 `npm run export:10000recipe-catalog`를 실행하고 변경된 `seed` 파일을 배포하세요.
+기존 카탈로그 파일을 읽을 수 없으면 원본을 `data`에 `.invalid-시각` 이름으로 보관한 뒤 초기 파일을 설치합니다.
+
+Docker의 호스트 프로젝트 폴더에 있는 `./data/10000recipe-catalog.db`가 컨테이너의 `/app/data/10000recipe-catalog.db`에 해당합니다. Next.js standalone 서버는 `.next/standalone`로 작업 디렉터리를 변경하지만 메뉴 API는 `MEAL_PLAN_ROOT=/app`을 기준으로 이 볼륨을 읽습니다. 필터가 비어 있으면 `docker compose logs app`에서 카탈로그 경로와 읽기 오류를 확인하세요.
+
 ```bash
 docker compose exec app npx prisma db push
 ```

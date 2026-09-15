@@ -9,4 +9,4 @@ ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 ENV MEAL_PLAN_ROOT=/app
 EXPOSE 7000
-CMD ["sh", "-c", "npx prisma db push && node scripts/migrate-attendance.mjs && exec node scripts/start.mjs"]
+CMD ["sh", "-c", "npx prisma db push && node scripts/migrate-attendance.mjs && node scripts/ensure-catalog.mjs && exec node scripts/start.mjs"]
