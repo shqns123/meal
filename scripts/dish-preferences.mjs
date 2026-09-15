@@ -56,9 +56,14 @@ export function validateMealPreferences(db, changes) {
       }
       const dish = dishes.find(d => dishCategory(d.category) === category && (d.name === title || safeList(d.aliases).includes(title)));
       const usage = effectiveUsage(dish?.preferences ?? [], roles);
-      if (usage !== "ALLOW") errors.push(`${change.date} ${category} '${title}': ${usage === "AVOID" ? "함께 먹는 가족이 피하는 메뉴입니다." : "식단 사용이 미확인입니다. 우리 집 메뉴에서 후보를 확인해 주세요."}`);
+      if (usage === "AVOID") errors.push(`${change.date} ${category} '${title}': 함께 먹는 가족이 피하는 메뉴입니다.`);
     };
-    check(change.main, "주찬", [old?.mainDish]);
+    const selectedMealStyle = Object.hasOwn(change, "mealStyle") ? change.mealStyle : old?.mealStyle;
+    const mainCategory = ["NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"].includes(selectedMealStyle)
+      ? "한그릇"
+      : "주찬";
+    check(change.main, mainCategory, [old?.mainDish]);
+    check(change.soup, "국/탕/찌개", [old?.soupDish]);
     for (const side of Array.isArray(change.sides) ? change.sides : []) check(side, "부찬", safeList(old?.sideDishes));
     check(change.lunch, "점심", [old?.lunchPlan]);
     check(change.baby, "아기", [old?.babyMenu]);

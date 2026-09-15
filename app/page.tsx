@@ -39,6 +39,8 @@ type Meal = {
   date: string;
   day: number;
   main: string;
+  soup?: string | null;
+  mealStyle?: string | null;
   sides: string[];
   type: string;
   color: string;
@@ -84,6 +86,8 @@ type MealSnapshot = {
   date: string;
   lunch?: string | null;
   main: string;
+  soup?: string | null;
+  mealStyle?: string | null;
   sides: string[];
   baby?: string | null;
   note?: string | null;
@@ -100,6 +104,8 @@ type DayDetail = {
   meal: {
     lunch?: string | null;
     main?: string | null;
+    soup?: string | null;
+    mealStyle?: string | null;
     sides: string[];
     baby?: string | null;
     note?: string | null;
@@ -952,7 +958,8 @@ function MealCard({ meal, onEdit }: {
         <Pencil size={12} />
       </button>
       <span className="block pr-5 text-black/45">{meal.type}</span>
-      <b className="block font-medium">주찬 · {meal.main}</b>
+      <b className="block font-medium">{meal.mealStyle === "SOUP_MEAL" ? "간단한 주찬" : ["NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"].includes(meal.mealStyle ?? "") ? "한그릇" : "주찬"} · {meal.main}</b>
+      {meal.soup && <span className="mt-0.5 block text-black/60">국/탕/찌개 · {meal.soup}</span>}
       {meal.sides.map((side) => (
         <span key={side} className="mt-0.5 block text-black/60">
           부찬 · {side}
@@ -1069,6 +1076,7 @@ function MobileMealList({
             {meal ? (
               <span className="min-w-0 flex-1">
                 <b className="block break-keep text-[15px] leading-5">{meal.main}</b>
+                {meal.soup && <span className="mt-1 block break-keep text-sm leading-5 text-black/65">국/탕/찌개 · {meal.soup}</span>}
                 <span className="mt-1 block break-keep text-sm leading-5 text-black/65">{meal.sides.join(" · ")}</span>
               </span>
             ) : (
@@ -1975,8 +1983,9 @@ function DayDetailModal({
                     {detail.meal.lunch ?? "계획 없음"}
                   </p>
                   <p className="font-medium">
-                    주찬 · {detail.meal.main ?? "계획 없음"}
+                    {detail.meal.mealStyle === "SOUP_MEAL" ? "간단한 주찬" : ["NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"].includes(detail.meal.mealStyle ?? "") ? "한그릇" : "주찬"} · {detail.meal.main ?? "계획 없음"}
                   </p>
+                  {detail.meal.soup && <p className="text-black/70">국/탕/찌개 · {detail.meal.soup}</p>}
                   {detail.meal.sides.map((side) => (
                     <p key={side} className="text-black/70">
                       부찬 · {side}
@@ -1987,7 +1996,8 @@ function DayDetailModal({
                   )}
                   <details className="pt-3"><summary className="cursor-pointer text-sm text-[#615d59]">이 메뉴, 다음에도 먹을까요?</summary>
                     <p className="mt-2 text-xs text-[#615d59]">가족 전체의 앞으로의 취향에 적용해요. 이번 주만 피하려면 주간 점검에 적어주세요.</p>
-                    {detail.meal.main && <MenuFeedback key={`주찬|${detail.meal.main}`} name={detail.meal.main} category="주찬" />}
+                    {detail.meal.main && <MenuFeedback key={`${["NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"].includes(detail.meal.mealStyle ?? "") ? "한그릇" : "주찬"}|${detail.meal.main}`} name={detail.meal.main} category={["NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"].includes(detail.meal.mealStyle ?? "") ? "한그릇" : "주찬"} />}
+                    {detail.meal.soup && <MenuFeedback key={`국/탕/찌개|${detail.meal.soup}`} name={detail.meal.soup} category="국/탕/찌개" />}
                     {detail.meal.sides.map(side => <MenuFeedback key={`부찬|${side}`} name={side} category="부찬" />)}
                   </details>
                   {detail.meal.note && (
@@ -2637,7 +2647,8 @@ function MealSnapshotCard({
       <p className="text-xs font-semibold text-black/40">{label}</p>
       {meal ? (
         <>
-          <p className="mt-2 font-medium">주찬 · {meal.main}</p>
+          <p className="mt-2 font-medium">{meal.mealStyle === "SOUP_MEAL" ? "간단한 주찬" : ["NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"].includes(meal.mealStyle ?? "") ? "한그릇" : "주찬"} · {meal.main}</p>
+          {meal.soup && <p className="mt-1 text-sm text-black/60">국/탕/찌개 · {meal.soup}</p>}
           {meal.sides.map((side) => (
             <p key={side} className="mt-1 text-sm text-black/60">
               부찬 · {side}

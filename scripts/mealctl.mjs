@@ -6,10 +6,15 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { preferenceContext, savePreference, validateMealPreferences } from "./dish-preferences.mjs";
 import { missingRecipeCoverage } from "../lib/recipe-coverage.mjs";
+import { chooseCatalogMenu, flattenCatalog } from "../lib/catalog-selection.mjs";
+import { assessMealDiversity } from "../lib/meal-diversity.mjs";
+import { assessFinalMealQuality } from "../lib/final-meal-quality.mjs";
 
 const root = process.env.MEAL_PLAN_ROOT ?? process.cwd();
 const dbPath =
   process.env.MEAL_DB_PATH ?? path.join(root, "data", "mealplan.db");
+const catalogPath =
+  process.env.MEAL_CATALOG_DB_PATH ?? path.join(root, "data", "10000recipe-catalog.db");
 const command = process.argv[2];
 const flags = parseFlags(process.argv.slice(3));
 
@@ -18,6 +23,7 @@ if (
   ![
     "context",
     "context-month",
+    "refresh-dish-history",
     "validate-week",
     "validate-month",
     "publish-week",
@@ -63,6 +69,7 @@ function usage() {
   console.error(`Usage:
   node scripts/mealctl.mjs context --week YYYY-MM-DD
   node scripts/mealctl.mjs context-month --month YYYY-MM
+  node scripts/mealctl.mjs refresh-dish-history
   node scripts/mealctl.mjs validate-week --input /path/week.json [--week YYYY-MM-DD]
   node scripts/mealctl.mjs validate-month --input /path/month.json --month YYYY-MM [--replace true]
   node scripts/mealctl.mjs publish-week --input /path/week.json --week YYYY-MM-DD [--request-id ID]
@@ -258,6 +265,18 @@ function loadContext(weekStart) {
       'SELECT * FROM "MealPlan" WHERE "date" >= ? AND "date" < ? ORDER BY "date"',
     )
     .all(startMs, endExclusiveMs);
+  const catalogItems = loadCatalogItems();
+  const recentRows = db.prepare(
+    'SELECT "date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
+  ).all(toMillis(addDays(weekStart, -30)), startMs);
+  const weeklyPreview = catalogSelectionPreview({
+    catalog: catalogItems,
+    dates: mealRows.map((meal) => formatKst(meal.date)),
+    history: catalogHistory(catalogItems, recentRows),
+    month: weekStart,
+    usage: catalogUsage(),
+    styles: new Map(mealRows.map((meal) => [formatKst(meal.date), meal.mealStyle])),
+  });
   const schedules = db
     .prepare(
       `SELECT s."date",s."memberId",s."isWorking",s."eatsAtCompany",s."isAway",s."lunchNotAtHome",s."dinnerNotAtHome",s."note",m.name AS memberName,m.role AS memberRole FROM "FamilySchedule" s JOIN "FamilyMember" m ON m.id=s.memberId WHERE s.date>=? AND s.date<? ORDER BY s.date`,
@@ -288,7 +307,8 @@ function loadContext(weekStart) {
     .all(startMs);
   return {
     schemaVersion: "meal-week.v1",
-    dishPreferences: preferenceContext(db),
+    dishPreferences: planningPreferenceContext(),
+    menuCatalog: catalogContext({ items: catalogItems, selectionPreview: weeklyPreview }),
     weekStart,
     weekEnd,
     timezone: "Asia/Seoul",
@@ -309,6 +329,8 @@ function loadContext(weekStart) {
       date: formatKst(meal.date),
       lunch: meal.lunchPlan,
       main: meal.mainDish,
+      soup: meal.soupDish,
+      mealStyle: meal.mealStyle,
       sides: parseJsonList(meal.sideDishes),
       baby: meal.babyMenu,
       note: meal.cookingNote,
@@ -336,7 +358,9 @@ function loadContext(weekStart) {
       mealChanges: [
         {
           date: "YYYY-MM-DD",
+          mealStyle: "MAIN_DISH|SOUP_MEAL|NOODLE_DUMPLING|RICE_PORRIDGE_TTEOK",
           main: "string",
+          soup: "required only for SOUP_MEAL",
           sides: ["side 1", "side 2"],
           lunch: "optional string",
           baby: "optional string",
@@ -381,13 +405,26 @@ function loadMonthContext(month) {
   const endExclusive = addDays(dates.at(-1), 1);
   const [year, numericMonth] = selectedMonth.split("-").map(Number);
   const previousMonth = `${numericMonth === 1 ? year - 1 : year}-${String(numericMonth === 1 ? 12 : numericMonth - 1).padStart(2, "0")}`;
-  const monthMeals = db.prepare('SELECT "date","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote" FROM "MealPlan" WHERE "monthKey"=? ORDER BY "date"').all(selectedMonth);
-  const previousMeals = db.prepare('SELECT "date","mainDish","sideDishes" FROM "MealPlan" WHERE "monthKey"=? ORDER BY "date"').all(previousMonth);
-  const recentMeals = db.prepare('SELECT "monthKey","date","mainDish","sideDishes" FROM "MealPlan" WHERE "monthKey">=? AND "monthKey"<? ORDER BY "date"').all(shiftMonth(selectedMonth, -3), selectedMonth);
+  const monthMeals = db.prepare('SELECT "date","lunchPlan","mainDish","soupDish","mealStyle","sideDishes","babyMenu","cookingNote" FROM "MealPlan" WHERE "monthKey"=? ORDER BY "date"').all(selectedMonth);
+  const previousMeals = db.prepare('SELECT "date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "monthKey"=? ORDER BY "date"').all(previousMonth);
+  const recentMeals = db.prepare('SELECT "monthKey","date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "monthKey">=? AND "monthKey"<? ORDER BY "date"').all(shiftMonth(selectedMonth, -3), selectedMonth);
   const schedules = db.prepare('SELECT s."date",s."isWorking",s."eatsAtCompany",s."isAway",s."lunchNotAtHome",s."dinnerNotAtHome",s."note",m."name" AS "memberName",m."role" AS "memberRole" FROM "FamilySchedule" s JOIN "FamilyMember" m ON m."id"=s."memberId" WHERE s."date">=? AND s."date"<? ORDER BY s."date"').all(toMillis(start), toMillis(endExclusive));
+  const catalogItems = loadCatalogItems();
+  const planningHistory = catalogHistory(catalogItems, [...recentMeals, ...previousMeals]);
+  const selectionPreview = catalogSelectionPreview({ catalog: catalogItems, dates, history: planningHistory, month: selectedMonth, usage: catalogUsage() });
+  const previewDiversity = assessMealDiversity({
+    plans: selectionPreview.map((item) => ({
+      date: item.date, mealStyle: item.mealStyle,
+      main: item.main?.name, soup: item.soup?.name,
+      sides: item.sides.map((side) => side.name),
+    })),
+    previousPlans: previousMeals.map((item) => ({ ...item, date: formatKst(item.date), sides: parseJsonList(item.sideDishes) })),
+    catalog: catalogItems,
+  });
   return {
     schemaVersion: "meal-month.v1",
-    dishPreferences: preferenceContext(db),
+    dishPreferences: planningPreferenceContext(),
+    menuCatalog: catalogContext({ items: catalogItems, selectionPreview, previewDiversity }),
     weeklyReviews: db.prepare('SELECT * FROM "WeeklyReview" WHERE "weekStart">=? AND "weekStart"<?').all(toMillis(sundayFor(start)), toMillis(endExclusive)).map(review => ({...review, weekStart: formatKst(review.weekStart), referenceDate: review.referenceDate ? formatKst(review.referenceDate) : formatKst(review.weekStart)})),
     month: selectedMonth,
     dates,
@@ -401,7 +438,7 @@ function loadMonthContext(month) {
     recentMonths: recentMeals.map((item) => ({ ...item, date: formatKst(item.date), sides: parseJsonList(item.sideDishes) })),
     outputContract: {
       changeReason: "string",
-      mealChanges: [{ date: "YYYY-MM-DD", lunch: "string", main: "string", sides: ["side 1", "side 2"], baby: "optional string", note: "optional string" }],
+      mealChanges: [{ date: "YYYY-MM-DD", mealStyle: "MAIN_DISH|SOUP_MEAL|NOODLE_DUMPLING|RICE_PORRIDGE_TTEOK", lunch: "string", main: "string", soup: "required only for SOUP_MEAL", sides: ["side 1", "side 2"], baby: "optional string", note: "optional string" }],
     },
   };
 }
@@ -417,6 +454,12 @@ const banned = [
     .map((item) => item.trim())
     .filter((item) => item && !/^(없음|없어요|해당 없음)$/i.test(item)),
 ];
+const mealStyles = new Set(["MAIN_DISH", "SOUP_MEAL", "NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"]);
+function mealStyleFor(change, current = "MAIN_DISH") {
+  return Object.hasOwn(change ?? {}, "mealStyle")
+    ? String(change.mealStyle || "")
+    : current || "MAIN_DISH";
+}
 const basicStock = new Set([
   "쌀",
   "밥",
@@ -457,7 +500,7 @@ function validatePayload(
   const endExclusiveMs = toMillis(addDays(weekStart, 7));
   const plans = db
     .prepare(
-      'SELECT "id","date","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote","dinnerDiningOut" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
+      'SELECT "id","date","lunchPlan","mainDish","soupDish","mealStyle","sideDishes","babyMenu","cookingNote","dinnerDiningOut" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
     )
     .all(startMs, endExclusiveMs);
   const plansByDate = new Map(
@@ -479,6 +522,13 @@ function validatePayload(
     changedDates.add(change.date);
     const plan = plansByDate.get(change.date);
     if (!plan) errors.push(`${at}.date does not have an existing meal plan.`);
+    const mealStyle = mealStyleFor(change, plan?.mealStyle);
+    if (!mealStyles.has(mealStyle))
+      errors.push(`${at}.mealStyle must be MAIN_DISH, SOUP_MEAL, NOODLE_DUMPLING, or RICE_PORRIDGE_TTEOK.`);
+    if (mealStyle === "SOUP_MEAL" && !String(change.soup ?? "").trim())
+      errors.push(`${at}.soup is required for SOUP_MEAL.`);
+    if (mealStyle !== "SOUP_MEAL" && String(change.soup ?? "").trim())
+      errors.push(`${at}.soup is only allowed for SOUP_MEAL.`);
     if (!String(change.main ?? "").trim())
       errors.push(`${at}.main is required.`);
     if (
@@ -498,6 +548,8 @@ function validatePayload(
         errors.push(`${at} contains banned ingredient: ${item}`);
     if (plan) {
       plan.mainDish = String(change.main ?? "").trim();
+      plan.soupDish = mealStyle === "SOUP_MEAL" ? String(change.soup).trim() : null;
+      plan.mealStyle = mealStyle;
       plan.sideDishes = JSON.stringify(change.sides ?? []);
       if (Object.hasOwn(change, "lunch")) plan.lunchPlan = change.lunch ?? null;
       if (Object.hasOwn(change, "baby")) plan.babyMenu = change.baby ?? null;
@@ -614,11 +666,40 @@ function validatePayload(
   const shopping = errors.length
     ? []
     : calculateShopping(payload.recipes, weekStart);
+  let qualityIssues = [];
+  let qualityScore = null;
+  let qualitySummary = null;
+  if (!errors.length && changedDates.size) {
+    const catalog = loadCatalogItems();
+    const effectivePlans = plans.map((plan) => ({
+      date: formatKst(plan.date), mealStyle: plan.mealStyle,
+      main: plan.mainDish, soup: plan.soupDish, sides: parseJsonList(plan.sideDishes),
+    }));
+    const previousPlans = db.prepare(
+      'SELECT "date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
+    ).all(toMillis(addDays(weekStart, -8)), startMs)
+      .map((plan) => ({ ...plan, date: formatKst(plan.date), sides: parseJsonList(plan.sideDishes) }));
+    const diversity = assessMealDiversity({
+      plans: effectivePlans, previousPlans, catalog, targetDates: [...changedDates],
+    });
+    const final = assessFinalMealQuality({
+      plans: effectivePlans, catalog, targetDates: [...changedDates],
+      knownMenus: confirmedMenuKeys(), verifiedRecipes: verifiedRecipeKeys(payload.recipes),
+      diversityIssues: diversity.issues,
+    });
+    qualityIssues = [...diversity.issues, ...final.issues];
+    qualityScore = final.score;
+    qualitySummary = final.summary;
+    warnings.push(...qualityIssues.map((issue) => issue.message));
+  }
   return {
     valid: errors.length === 0,
     weekStart,
     errors,
     warnings,
+    qualityIssues,
+    qualityScore,
+    qualitySummary,
     counts: {
       meals: plans.length,
       mealChanges: payload.mealChanges?.length ?? 0,
@@ -661,6 +742,13 @@ function validateMonth(payload, month, allowExisting = false) {
     changedDates.add(change.date);
     if (!String(change.lunch ?? "").trim()) errors.push(`${at}.lunch is required.`);
     if (!String(change.main ?? "").trim()) errors.push(`${at}.main is required.`);
+    const mealStyle = mealStyleFor(change);
+    if (!mealStyles.has(mealStyle))
+      errors.push(`${at}.mealStyle must be MAIN_DISH, SOUP_MEAL, NOODLE_DUMPLING, or RICE_PORRIDGE_TTEOK.`);
+    if (mealStyle === "SOUP_MEAL" && !String(change.soup ?? "").trim())
+      errors.push(`${at}.soup is required for SOUP_MEAL.`);
+    if (mealStyle !== "SOUP_MEAL" && String(change.soup ?? "").trim())
+      errors.push(`${at}.soup is only allowed for SOUP_MEAL.`);
     if (!Array.isArray(change.sides) || change.sides.length !== 2 || change.sides.some((side) => !String(side).trim()))
       errors.push(`${at}.sides must contain exactly two named side dishes.`);
     if (Array.isArray(change.sides) && new Set(change.sides.map(normalizeName)).size !== change.sides.length)
@@ -692,7 +780,37 @@ function validateMonth(payload, month, allowExisting = false) {
   const existing = db.prepare('SELECT "date" FROM "MealPlan" WHERE "monthKey"=?').all(selectedMonth);
   if (existing.length && !allowExisting)
     errors.push(`${selectedMonth} already has ${existing.length} saved meal plans and will not be overwritten.`);
-  return { valid: errors.length === 0, month: selectedMonth, errors, warnings, counts: { mealChanges: changes.length } };
+  let qualityIssues = [];
+  let diversitySummary = null;
+  let qualityScore = null;
+  let qualitySummary = null;
+  if (!errors.length) {
+    const catalog = loadCatalogItems();
+    const previousPlans = db.prepare(
+      'SELECT "date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
+    ).all(toMillis(addDays(dates[0], -8)), toMillis(dates[0]))
+      .map((plan) => ({ ...plan, date: formatKst(plan.date), sides: parseJsonList(plan.sideDishes) }));
+    const diversity = assessMealDiversity({
+      plans: changes,
+      previousPlans,
+      catalog,
+      activeFrom: flags["replace-from"] && dates.includes(flags["replace-from"])
+        ? flags["replace-from"] : null,
+    });
+    const targetDates = flags["replace-from"] && dates.includes(flags["replace-from"])
+      ? dates.filter((date) => date >= flags["replace-from"]) : dates;
+    const final = assessFinalMealQuality({
+      plans: changes, catalog, targetDates,
+      knownMenus: confirmedMenuKeys(), verifiedRecipes: verifiedRecipeKeys(),
+      diversityIssues: diversity.issues,
+    });
+    qualityIssues = [...diversity.issues, ...final.issues];
+    diversitySummary = diversity.summary;
+    qualityScore = final.score;
+    qualitySummary = final.summary;
+    warnings.push(...qualityIssues.map((issue) => issue.message));
+  }
+  return { valid: errors.length === 0, month: selectedMonth, errors, warnings, qualityIssues, qualityScore, qualitySummary, diversitySummary, counts: { mealChanges: changes.length } };
 }
 
 function previousMonthKey(month) {
@@ -707,6 +825,241 @@ function shiftMonth(month, amount) {
 
 function normalizeName(value) {
   return String(value).trim().replace(/\s+/g, " ");
+}
+
+function catalogRole(sourceCategory) {
+  if (sourceCategory === "메인반찬") return "주찬";
+  if (sourceCategory === "밑반찬") return "부찬";
+  if (["국/탕", "찌개"].includes(sourceCategory)) return "국/탕/찌개";
+  if (["면/만두", "밥/죽/떡"].includes(sourceCategory)) return "한그릇";
+  return null;
+}
+function catalogUsage() {
+  return new Map(preferenceContext(db)
+    .map((dish) => [`${dish.category}|${normalizeName(dish.name)}`, dish.usage]));
+}
+function confirmedMenuKeys() {
+  return new Set(db.prepare(
+    `SELECT DISTINCT d."category",d."name" FROM "Dish" d
+     JOIN "DishPreference" p ON p."dishId"=d."id"
+     WHERE p."scope"='family' AND (p."usage"='ALLOW' OR p."familiarity"='FAMILIAR')`,
+  ).all().map((item) => `${item.category}|${normalizeName(item.name)}`));
+}
+function verifiedRecipeKeys(additionalRecipes = []) {
+  const keys = new Set();
+  const stored = db.prepare(
+    `SELECT "title","category" FROM "Recipe"
+     WHERE "sourceUrl" IS NOT NULL AND TRIM("sourceUrl")<>''
+       AND "sourceCheckedAt" IS NOT NULL AND "needsReview"=0`,
+  ).all();
+  for (const recipe of [...stored, ...additionalRecipes.filter((item) =>
+    item && item.sourceUrl && item.sourceCheckedAt && ["주찬", "반찬"].includes(item.category))]) {
+    const name = normalizeName(recipe.title);
+    const category = recipe.category === "반찬" ? "부찬" : recipe.category;
+    keys.add(`${category}|${name}`);
+    if (category === "주찬") keys.add(`한그릇|${name}`);
+  }
+  return keys;
+}
+function loadCatalogItems() {
+  if (!fs.existsSync(catalogPath))
+    return [];
+  const catalog = new DatabaseSync(catalogPath, { readOnly: true });
+  try {
+    return flattenCatalog(catalog.prepare(
+      `SELECT m."sourceCategory",m."cookingMethods",m."cookingMethodOrigin",m."ingredientCategories",m."ingredientCategoryOrigin",m."name" AS "baseName",v."name" AS "variantName",v."searchUrl"
+       FROM "RecipeCatalogMenu" m
+       JOIN "RecipeCatalogVariant" v ON v."menuId"=m."id"
+       ORDER BY m."sourceCategory",m."name",v."position"`,
+    ).all());
+  } finally {
+    catalog.close();
+  }
+}
+function catalogHistory(items, meals) {
+  const byVariant = new Map();
+  for (const item of items) {
+    const key = normalizeName(item.variantName);
+    const matches = byVariant.get(key) ?? [];
+    matches.push(item);
+    byVariant.set(key, matches);
+  }
+  const history = [];
+  for (const meal of meals) {
+    const mainCategories = meal.mealStyle === "NOODLE_DUMPLING" ? ["면/만두"]
+      : meal.mealStyle === "RICE_PORRIDGE_TTEOK" ? ["밥/죽/떡"] : ["메인반찬"];
+    const slots = [
+      { name: meal.mainDish, categories: mainCategories },
+      { name: meal.soupDish, categories: ["국/탕", "찌개"] },
+      ...parseJsonList(meal.sideDishes).map((name) => ({ name, categories: ["밑반찬"] })),
+    ];
+    for (const slot of slots) {
+      const matches = byVariant.get(normalizeName(slot.name)) ?? [];
+      const item = matches.find((candidate) => slot.categories.includes(candidate.sourceCategory)) ?? matches[0];
+      if (item) history.push({
+        date: formatKst(meal.date),
+        variantName: item.variantName,
+        baseName: item.baseName,
+        sourceCategory: item.sourceCategory,
+        selectionRole: item.selectionRole,
+        cookingFamily: item.cookingFamily,
+        similarGroup: item.similarGroup,
+        flavorFamily: item.flavorFamily,
+        primaryIngredient: item.primaryIngredient,
+      });
+    }
+  }
+  return history;
+}
+function isCatalogItemAllowed(item) {
+  const nonMealPatterns = /양념장|소스|드레싱|카나페|도시락|도시락반찬|만들기팁|보관법/;
+  return !nonMealPatterns.test(item.variantName)
+    && !banned.some((ingredient) => ingredient && item.variantName.includes(ingredient));
+}
+function weeklyAvoidForDate(date) {
+  const review = db.prepare('SELECT "referenceDate","weekStart","avoidFoods" FROM "WeeklyReview" WHERE "weekStart"=?')
+    .get(toMillis(sundayFor(date)));
+  return review && toMillis(date) >= Number(review.referenceDate || review.weekStart)
+    ? String(review.avoidFoods || "") : "";
+}
+function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage, pickSides }) {
+  const pick = (sourceCategories, role, excludeCookingFamily = null) => {
+    const weeklyAvoid = weeklyAvoidForDate(date);
+    const selected = chooseCatalogMenu({
+      catalog: catalog.filter((item) => isCatalogItemAllowed(item)
+        && usage.get(`${catalogRole(item.sourceCategory)}|${normalizeName(item.variantName)}`) !== "AVOID"
+        && (!excludeCookingFamily || item.cookingFamily !== excludeCookingFamily)
+        && !weeklyAvoid.includes(item.variantName)),
+      history, sourceCategories, date, seed: `${seed}:${role}`,
+    });
+    if (!selected) return null;
+    history.push({ date, variantName: selected.variantName, baseName: selected.baseName, sourceCategory: selected.sourceCategory, selectionRole: selected.selectionRole, cookingFamily: selected.cookingFamily, similarGroup: selected.similarGroup, flavorFamily: selected.flavorFamily, ingredientCategories: selected.ingredientCategories, primaryIngredient: selected.primaryIngredient });
+    return { name: selected.variantName, baseMenu: selected.baseName, cookingFamily: selected.cookingFamily, cookingMethods: selected.cookingMethods, cookingMethodOrigin: selected.cookingMethodOrigin, ingredientCategories: selected.ingredientCategories, ingredientCategoryOrigin: selected.ingredientCategoryOrigin, similarGroup: selected.similarGroup, flavorFamily: selected.flavorFamily, primaryIngredient: selected.primaryIngredient, sourceCategory: selected.sourceCategory };
+  };
+  let main;
+  let soup = null;
+  if (mealStyle === "SOUP_MEAL") {
+    main = pick(["메인반찬"], "main");
+    soup = pick(["국/탕", "찌개"], "soup");
+  } else if (mealStyle === "NOODLE_DUMPLING") main = pick(["면/만두"], "main");
+  else if (mealStyle === "RICE_PORRIDGE_TTEOK") main = pick(["밥/죽/떡"], "main");
+  else main = pick(["메인반찬"], "main");
+  let sides = null;
+  if (pickSides) {
+    const firstSide = pick(["밑반찬"], "side-1");
+    const secondSide = pick(["밑반찬"], "side-2", firstSide?.cookingFamily);
+    sides = [firstSide, secondSide].filter(Boolean);
+  }
+  return { main, soup, sides };
+}
+function mealStyleForDate(date) {
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+  if (weekday === 0) return "RICE_PORRIDGE_TTEOK";
+  if (weekday === 4) return "SOUP_MEAL";
+  if (weekday === 6) return "NOODLE_DUMPLING";
+  return "MAIN_DISH";
+}
+function catalogSelectionPreview({ catalog, dates, history, month, usage, styles = new Map() }) {
+  const evolvingHistory = [...history];
+  let sidePair = null;
+  return dates.map((date, index) => {
+    const mealStyle = styles.get(date) || mealStyleForDate(date);
+    const selectSides = index % 3 === 0 || !sidePair;
+    const selection = selectionForMealStyle({ catalog, history: evolvingHistory, date, mealStyle, seed: `${month}:${date}`, usage, pickSides: selectSides });
+    if (selectSides) sidePair = selection.sides;
+    const withStatus = (item) => item && {
+      ...item,
+      status: usage.get(`${catalogRole(item.sourceCategory)}|${normalizeName(item.name)}`) === "ALLOW" ? "ALLOW" : "UNKNOWN",
+    };
+    return { date, mealStyle, main: withStatus(selection.main), soup: withStatus(selection.soup), sides: (sidePair ?? []).map(withStatus) };
+  });
+}
+function catalogContext({ items = null, selectionPreview = [], previewDiversity = null } = {}) {
+  const catalogItems = items ?? loadCatalogItems();
+  if (!catalogItems.length)
+    return { available: false, reason: "10000recipe 카탈로그 DB가 없습니다.", selectionPreview: [] };
+  const usage = catalogUsage();
+  try {
+    const grouped = new Map();
+    for (const item of catalogItems) {
+      const role = catalogRole(item.sourceCategory);
+      if (!role) continue;
+      const key = `${item.sourceCategory}|${item.baseName}`;
+      const entry = grouped.get(key) ?? {
+        sourceCategory: item.sourceCategory,
+        role,
+        baseMenu: item.baseName,
+        allowedNames: [],
+      };
+      if (usage.get(`${role}|${normalizeName(item.variantName)}`) === "ALLOW")
+        entry.allowedNames.push({ name: item.variantName, searchUrl: item.searchUrl });
+      grouped.set(key, entry);
+    }
+    const allowedVariantCount = [...grouped.values()].reduce((count, entry) => count + entry.allowedNames.length, 0);
+    const unknownVariantCount = catalogItems.filter((item) => usage.get(`${catalogRole(item.sourceCategory)}|${normalizeName(item.variantName)}`) !== "AVOID" && usage.get(`${catalogRole(item.sourceCategory)}|${normalizeName(item.variantName)}`) !== "ALLOW").length;
+    return {
+      available: true,
+      selectionRule: "AVOID를 제외한 카탈로그 세부메뉴는 자동 후보입니다. UNKNOWN은 미확인 상태 그대로 식단에 사용할 수 있으며, ALLOW로 추정하지 않습니다.",
+      candidateCounts: { allowedVariantCount, unknownVariantCount },
+      selectionAlgorithm: {
+        order: ["식사형태", "조리계열", "기본메뉴", "세부메뉴"],
+        unit: "기본메뉴마다 같은 기본 확률을 적용하고, 세부메뉴 수는 기본메뉴 선택 확률에 영향을 주지 않습니다.",
+        cooldownDays: { variant: 30, baseStrong: 10, baseSoft: 14, similarStrong: 5, similarSoft: 8, cookingFamily: 2, primaryIngredient: 2 },
+      },
+      selectionPreview,
+      selectionPreviewQuality: previewDiversity && {
+        summary: previewDiversity.summary,
+        warnings: previewDiversity.issues.filter((issue) => issue.severity === "HIGH")
+          .slice(0, 8).map((issue) => issue.message),
+      },
+      allowedMenus: [...grouped.values()]
+        .filter((entry) => entry.allowedNames.length)
+        .map((entry) => ({ ...entry, allowedNames: entry.allowedNames.filter((value, index, all) => all.findIndex((candidate) => candidate.name === value.name) === index) })),
+    };
+  } catch (error) {
+    return { available: false, reason: `카탈로그를 읽지 못했습니다: ${error.message}`, selectionPreview: [] };
+  }
+}
+function planningPreferenceContext() {
+  return preferenceContext(db).filter(
+    (dish) => dish.preferences.length > 0 || dish.lastPlannedAt,
+  );
+}
+function syncDishLastPlannedAt() {
+  const latest = new Map();
+  const track = (name, category, date) => {
+    const title = normalizeName(name);
+    if (!title || ["회사 식사", "외식", "미식사", "없음"].includes(title)) return;
+    const key = `${category}|${title}`;
+    const previous = latest.get(key);
+    if (!previous || date > previous.date) latest.set(key, { name: title, category, date });
+  };
+  const plans = db.prepare('SELECT "date","lunchPlan","mainDish","soupDish","mealStyle","sideDishes","babyMenu" FROM "MealPlan"').all();
+  for (const plan of plans) {
+    track(plan.mainDish, ["NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"].includes(plan.mealStyle) ? "한그릇" : "주찬", Number(plan.date));
+    track(plan.soupDish, "국/탕/찌개", Number(plan.date));
+    track(plan.lunchPlan, "점심", Number(plan.date));
+    track(plan.babyMenu, "아기", Number(plan.date));
+    for (const side of parseJsonList(plan.sideDishes)) track(side, "부찬", Number(plan.date));
+  }
+  db.prepare('UPDATE "Dish" SET "lastPlannedAt"=NULL').run();
+  const save = db.prepare(`INSERT INTO "Dish" ("id","name","category","aliases","createdAt","lastPlannedAt") VALUES (?,?,?,?,?,?)
+    ON CONFLICT("name","category") DO UPDATE SET "lastPlannedAt"=excluded."lastPlannedAt"`);
+  const createdAt = Date.now();
+  for (const dish of latest.values())
+    save.run(crypto.randomUUID(), dish.name, dish.category, "[]", createdAt, dish.date);
+  return latest.size;
+}
+function refreshDishHistory() {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const count = syncDishLastPlannedAt();
+    db.exec("COMMIT");
+    printJson({ success: true, dishes: count });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
 }
 function validateBlogSource(recipe, at, errors) {
   if (!String(recipe.sourceUrl ?? "").trim()) {
@@ -1076,7 +1429,7 @@ function publishMonth(payload, month, requestId = null) {
           clearGeneratedShopping.run(shoppingWeek.id, "직접 추가");
       }
     }
-    const insertPlan = db.prepare('INSERT INTO "MealPlan" ("id","date","monthKey","mealType","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote","changeReason","adultServings","childServings","dinnerDiningOut","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    const insertPlan = db.prepare('INSERT INTO "MealPlan" ("id","date","monthKey","mealType","lunchPlan","mainDish","soupDish","mealStyle","sideDishes","babyMenu","cookingNote","changeReason","adultServings","childServings","dinnerDiningOut","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     const changesToPublish = payload.mealChanges.filter((change) =>
       affectedDateSet.has(String(change.date)),
     );
@@ -1089,6 +1442,8 @@ function publishMonth(payload, month, requestId = null) {
         "DINNER",
         String(change.lunch).trim(),
         String(change.main).trim(),
+        mealStyleFor(change) === "SOUP_MEAL" ? String(change.soup).trim() : null,
+        mealStyleFor(change),
         JSON.stringify(change.sides.map((side) => String(side).trim())),
         String(change.baby ?? "").trim() || null,
         String(change.note ?? "").trim() || null,
@@ -1100,10 +1455,11 @@ function publishMonth(payload, month, requestId = null) {
         now,
       );
     }
-    const summary = JSON.stringify({ mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, month: selectedMonth, replaced: Boolean(existingCount), replaceFrom, warnings: validation.warnings });
+    syncDishLastPlannedAt();
+    const summary = JSON.stringify({ mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, month: selectedMonth, replaced: Boolean(existingCount), replaceFrom, warnings: validation.warnings, qualityScore: validation.qualityScore, qualitySummary: validation.qualitySummary });
     db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?').run("COMPLETED", summary, Date.now(), jobId);
     db.exec("COMMIT");
-    printJson({ success: true, jobId, month: selectedMonth, mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, replaced: Boolean(existingCount), replaceFrom, warnings: validation.warnings });
+    printJson({ success: true, jobId, month: selectedMonth, mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, replaced: Boolean(existingCount), replaceFrom, warnings: validation.warnings, qualityScore: validation.qualityScore, qualitySummary: validation.qualitySummary });
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}
     db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", String(error.message ?? error), Date.now(), jobId);
@@ -1149,10 +1505,10 @@ function publishWeek(
   try {
     db.exec("BEGIN IMMEDIATE");
     const findPlan = db.prepare(
-      'SELECT "id","lunchPlan","mainDish","sideDishes","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?',
+      'SELECT "id","lunchPlan","mainDish","soupDish","mealStyle","sideDishes","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?',
     );
     const updatePlan = db.prepare(
-      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=NULL,"updatedAt"=? WHERE "id"=?',
+      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"soupDish"=?,"mealStyle"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=NULL,"updatedAt"=? WHERE "id"=?',
     );
     for (const change of payload.mealChanges ?? []) {
       const current = findPlan.get(toMillis(change.date));
@@ -1161,6 +1517,8 @@ function publishWeek(
           ? (change.lunch ?? null)
           : current.lunchPlan,
         change.main,
+        mealStyleFor(change, current.mealStyle) === "SOUP_MEAL" ? String(change.soup).trim() : null,
+        mealStyleFor(change, current.mealStyle),
         JSON.stringify(change.sides),
         Object.hasOwn(change, "baby")
           ? (change.baby ?? null)
@@ -1246,11 +1604,14 @@ function publishWeek(
     let shoppingItems = 0;
     if (rebuildShopping)
       shoppingItems = writeShopping(weekStart, payload.recipes, now).length;
+    if (payload.mealChanges?.length) syncDishLastPlannedAt();
     const summary = JSON.stringify({
       mealChanges: payload.mealChanges?.length ?? 0,
       recipes: payload.recipes.length,
       shoppingItems,
       warnings: validation.warnings,
+      qualityScore: validation.qualityScore,
+      qualitySummary: validation.qualitySummary,
       backup: backupPath,
     });
     db.prepare(
@@ -1266,6 +1627,8 @@ function publishWeek(
       recipes: payload.recipes.length,
       shoppingItems,
       warnings: validation.warnings,
+      qualityScore: validation.qualityScore,
+      qualitySummary: validation.qualitySummary,
     });
   } catch (error) {
     try {
@@ -1307,16 +1670,18 @@ function publishDay(payload, weekStart, date, requestId = null) {
     const change = payload.mealChanges[0];
     const current = db
       .prepare(
-        'SELECT "id","lunchPlan","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?',
+        'SELECT "id","lunchPlan","soupDish","mealStyle","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?',
       )
       .get(toMillis(date));
     db.prepare(
-      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=NULL,"updatedAt"=? WHERE "id"=?',
+      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"soupDish"=?,"mealStyle"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=NULL,"updatedAt"=? WHERE "id"=?',
     ).run(
       Object.hasOwn(change, "lunch")
         ? (change.lunch ?? null)
         : current.lunchPlan,
       change.main,
+      mealStyleFor(change, current.mealStyle) === "SOUP_MEAL" ? String(change.soup).trim() : null,
+      mealStyleFor(change, current.mealStyle),
       JSON.stringify(change.sides),
       Object.hasOwn(change, "baby") ? (change.baby ?? null) : current.babyMenu,
       Object.hasOwn(change, "note")
@@ -1366,11 +1731,14 @@ function publishDay(payload, weekStart, date, requestId = null) {
       storedRecipes(weekStart, { skipInvalid: true }),
       now,
     );
+    syncDishLastPlannedAt();
     const summary = JSON.stringify({
       mealChanges: 1,
       recipes: payload.recipes.length,
       shoppingItems: shopping.length,
       warnings: validation.warnings,
+      qualityScore: validation.qualityScore,
+      qualitySummary: validation.qualitySummary,
       skippedLegacyRecipes,
       backup: backupPath,
     });
@@ -1388,6 +1756,8 @@ function publishDay(payload, weekStart, date, requestId = null) {
       recipes: payload.recipes.length,
       shoppingItems: shopping.length,
       warnings: validation.warnings,
+      qualityScore: validation.qualityScore,
+      qualitySummary: validation.qualitySummary,
       skippedLegacyRecipes,
     });
   } catch (error) {
@@ -1624,6 +1994,7 @@ function publishDays(payload) {
     fail("변경할 날짜가 중복되었습니다.");
   const errors = [];
   const warnings = [];
+  const byWeek = new Map();
   for (const change of changes) {
     const date = String(change?.date ?? "");
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -1631,32 +2002,63 @@ function publishDays(payload) {
       continue;
     }
     const weekStart = sundayFor(date);
-    const dayPayload = {
+    byWeek.set(weekStart, [...(byWeek.get(weekStart) ?? []), change]);
+  }
+  const qualityScores = [];
+  for (const [weekStart, weekChanges] of byWeek) {
+    const weekPayload = {
       schemaVersion: "meal-week.v1",
       weekStart,
       changeReason: payload.changeReason,
-      mealChanges: [change],
+      mealChanges: weekChanges,
       recipes: [],
     };
-    const validation = validateDay(dayPayload, weekStart, date);
+    const validation = validatePayload(weekPayload, weekStart, null, false);
     errors.push(...validation.errors);
     warnings.push(...validation.warnings);
+    qualityScores.push({ weekStart, score: validation.qualityScore,
+      catalogMainPercent: validation.qualitySummary?.catalogMainPercent ?? null });
   }
   if (errors.length) {
-    printJson({ valid: false, errors, warnings });
+    printJson({ valid: false, errors, warnings, qualityScores });
     process.exitCode = 2;
     return;
   }
+  const sortedDates = [...dates].sort();
+  const firstDate = sortedDates[0], lastDate = sortedDates.at(-1);
+  const catalog = loadCatalogItems();
+  const changeByDate = new Map(changes.map((change) => [String(change.date), change]));
+  const effectivePlans = db.prepare(
+    'SELECT "date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
+  ).all(toMillis(firstDate), toMillis(addDays(lastDate, 1))).map((plan) => {
+    const date = formatKst(plan.date);
+    const change = changeByDate.get(date);
+    const mealStyle = change ? mealStyleFor(change, plan.mealStyle) : plan.mealStyle;
+    return { date, mealStyle,
+      main: change?.main ?? plan.mainDish,
+      soup: change ? mealStyle === "SOUP_MEAL" ? change.soup : null : plan.soupDish,
+      sides: change?.sides ?? parseJsonList(plan.sideDishes) };
+  });
+  const previousPlans = db.prepare(
+    'SELECT "date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
+  ).all(toMillis(addDays(firstDate, -8)), toMillis(firstDate))
+    .map((plan) => ({ ...plan, date: formatKst(plan.date), sides: parseJsonList(plan.sideDishes) }));
+  const diversity = assessMealDiversity({ plans: effectivePlans, previousPlans, catalog, targetDates: dates });
+  const final = assessFinalMealQuality({ plans: effectivePlans, catalog, targetDates: dates,
+    knownMenus: confirmedMenuKeys(), verifiedRecipes: verifiedRecipeKeys(), diversityIssues: diversity.issues });
+  warnings.push(...diversity.issues.map((issue) => issue.message), ...final.issues.map((issue) => issue.message));
+  const overallQuality = { score: final.score, summary: final.summary,
+    highWarnings: [...diversity.issues, ...final.issues].filter((issue) => issue.severity === "HIGH").map((issue) => issue.message) };
   const backupPath = backupDatabase("meal-days");
   const now = Date.now();
   const affectedWeeks = [...new Set(dates.map(sundayFor))];
   try {
     db.exec("BEGIN IMMEDIATE");
     const findPlan = db.prepare(
-      'SELECT "id","lunchPlan","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?',
+      'SELECT "id","lunchPlan","soupDish","mealStyle","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?',
     );
     const updatePlan = db.prepare(
-      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=NULL,"updatedAt"=? WHERE "id"=?',
+      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"soupDish"=?,"mealStyle"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=NULL,"updatedAt"=? WHERE "id"=?',
     );
     const findRecipes = db.prepare(
       'SELECT "id","plannedDates" FROM "Recipe" WHERE "weekKeys" LIKE ? AND "plannedDates" LIKE ?',
@@ -1675,6 +2077,8 @@ function publishDays(payload) {
       updatePlan.run(
         Object.hasOwn(change, "lunch") ? (change.lunch ?? null) : current.lunchPlan,
         change.main,
+        mealStyleFor(change, current.mealStyle) === "SOUP_MEAL" ? String(change.soup).trim() : null,
+        mealStyleFor(change, current.mealStyle),
         JSON.stringify(change.sides),
         Object.hasOwn(change, "baby") ? (change.baby ?? null) : current.babyMenu,
         Object.hasOwn(change, "note") ? (change.note ?? null) : current.cookingNote,
@@ -1692,8 +2096,10 @@ function publishDays(payload) {
     }
     for (const weekStart of affectedWeeks)
       writeShopping(weekStart, storedRecipes(weekStart, { skipInvalid: true }), now);
+    syncDishLastPlannedAt();
     db.exec("COMMIT");
-    printJson({ success: true, mealChanges: changes.length, affectedWeeks, backup: backupPath, warnings });
+    printJson({ success: true, mealChanges: changes.length, affectedWeeks, backup: backupPath,
+      warnings: [...new Set(warnings)], qualityScores, overallQuality });
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}
     throw error;
@@ -2054,6 +2460,7 @@ fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Auth
 try {
   if (command === "context") printJson(loadContext(requireWeek(flags.week)));
   if (command === "context-month") printJson(loadMonthContext(requireMonth(flags.month)));
+  if (command === "refresh-dish-history") refreshDishHistory();
   if (command === "validate-week") {
     const payload = readPayload(flags.input);
     const result = validatePayload(

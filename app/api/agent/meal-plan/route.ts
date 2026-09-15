@@ -261,6 +261,8 @@ async function readMeal(date: string) {
     date,
     lunch: meal.lunchPlan,
     main: meal.mainDish ?? "",
+    soup: meal.soupDish,
+    mealStyle: meal.mealStyle,
     sides: parseList(meal.sideDishes),
     baby: meal.babyMenu,
     note: meal.cookingNote,

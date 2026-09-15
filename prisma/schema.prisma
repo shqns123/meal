@@ -29,6 +29,7 @@ model Dish {
   aliases     String           @default("[]")
   preferences DishPreference[]
   createdAt   DateTime         @default(now())
+  lastPlannedAt DateTime?
 
   @@unique([name, category])
 }
@@ -92,6 +93,8 @@ model MealPlan {
   mealType         MealType
   lunchPlan        String?
   mainDish         String?
+  soupDish         String?
+  mealStyle        String        @default("MAIN_DISH")
   sideDishes       String        @default("")
   babyMenu         String?
   cookingNote      String?

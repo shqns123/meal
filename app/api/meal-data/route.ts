@@ -38,6 +38,8 @@ export async function GET(request: Request) {
         }).format(meal.date),
       ),
       main: meal.mainDish ?? "",
+      soup: meal.soupDish,
+      mealStyle: meal.mealStyle,
       sides: parseList(meal.sideDishes),
       type:
         meal.mealType === "DINNER"

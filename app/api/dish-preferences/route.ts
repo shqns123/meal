@@ -1,14 +1,67 @@
 import { NextResponse } from "next/server";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { prisma } from "@/lib/prisma";
 import { CATEGORIES, dishCategory, dishName, validatePreference } from "@/lib/dish-preference-rules.mjs";
 
-export async function GET() {
+export const runtime = "nodejs";
+
+type CatalogMatch = { sourceCategory: string; baseMenu: string; isBaseMenu: boolean; cookingMethods: string[]; ingredientCategories: string[] };
+const catalogRoles: Record<string, string> = {
+  "메인반찬": "주찬", "밑반찬": "부찬", "국/탕": "국/탕/찌개", "찌개": "국/탕/찌개",
+  "면/만두": "한그릇", "밥/죽/떡": "한그릇",
+};
+
+function catalogMatches() {
+  const matches = new Map<string, CatalogMatch[]>();
+  const catalogPath = process.env.MEAL_CATALOG_DB_PATH ?? join(process.cwd(), "data", "10000recipe-catalog.db");
+  if (!existsSync(catalogPath)) return { matches, available: false };
+  let catalog: DatabaseSync;
+  try { catalog = new DatabaseSync(catalogPath, { readOnly: true }); }
+  catch { return { matches: new Map<string, CatalogMatch[]>(), available: false }; }
+  try {
+    const rows = catalog.prepare(`SELECT m."sourceCategory",m."name" AS "baseMenu",m."cookingMethods",m."ingredientCategories",v."name" AS "variantName"
+      FROM "RecipeCatalogMenu" m LEFT JOIN "RecipeCatalogVariant" v ON v."menuId"=m."id"`).all() as {
+      sourceCategory: string; baseMenu: string; cookingMethods: string; ingredientCategories: string; variantName: string | null
+    }[];
+    for (const row of rows) {
+      const role = catalogRoles[row.sourceCategory];
+      if (!role) continue;
+      const cookingMethods = JSON.parse(row.cookingMethods) as string[];
+      const ingredientCategories = JSON.parse(row.ingredientCategories) as string[];
+      for (const [name, isBaseMenu] of [[row.baseMenu, true], [row.variantName, false]] as [string | null, boolean][]) {
+        if (!name) continue;
+        const key = `${role}|${dishName(name)}`;
+        const entries = matches.get(key) ?? [];
+        if (!entries.some(entry => entry.sourceCategory === row.sourceCategory && entry.baseMenu === row.baseMenu && entry.isBaseMenu === isBaseMenu))
+          entries.push({ sourceCategory: row.sourceCategory, baseMenu: row.baseMenu, isBaseMenu, cookingMethods, ingredientCategories });
+        matches.set(key, entries);
+      }
+    }
+    return { matches, available: true };
+  } catch {
+    return { matches: new Map<string, CatalogMatch[]>(), available: false };
+  } finally {
+    catalog.close();
+  }
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const targetName = url.searchParams.get("name");
+  const targetCategory = url.searchParams.get("category");
+  if (targetName && targetCategory && CATEGORIES.includes(dishCategory(targetCategory))) {
+    const dish = await prisma.dish.findUnique({ where: { name_category: { name: dishName(targetName), category: dishCategory(targetCategory) } }, include: { preferences: true } });
+    return NextResponse.json({ dishes: dish ? [dish] : [], family: [], catalogAvailable: true });
+  }
   const [dishes, recipes, meals, family] = await Promise.all([
     prisma.dish.findMany({ include: { preferences: true }, orderBy: { name: "asc" } }),
     prisma.recipe.findMany({ select: { title: true, category: true } }),
-    prisma.mealPlan.findMany({ select: { mainDish: true, sideDishes: true, lunchPlan: true, babyMenu: true } }),
+    prisma.mealPlan.findMany({ select: { mainDish: true, soupDish: true, mealStyle: true, sideDishes: true, lunchPlan: true, babyMenu: true } }),
     prisma.familyMember.findMany({ select: { name: true, role: true } }),
   ]);
+  const catalog = catalogMatches();
   const candidates = new Map<string, {name: string; category: string; preferences: typeof dishes[number]["preferences"]}>();
   function add(name: string | null, category: string) {
     const title = dishName(name);
@@ -18,14 +71,21 @@ export async function GET() {
     if (!candidates.has(key)) candidates.set(key, { name: title, category: kind, preferences: [] });
   }
   for (const dish of dishes) candidates.set(`${dish.category}|${dish.name}`, dish);
+  for (const key of catalog.matches.keys()) {
+    const [category, ...nameParts] = key.split("|");
+    add(nameParts.join("|"), category);
+  }
   for (const recipe of recipes) add(recipe.title, recipe.category);
   for (const meal of meals) {
-    add(meal.mainDish, "주찬"); add(meal.lunchPlan, "점심"); add(meal.babyMenu, "아기");
+    add(meal.mainDish, ["NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"].includes(meal.mealStyle) ? "한그릇" : "주찬");
+    add(meal.soupDish, "국/탕/찌개"); add(meal.lunchPlan, "점심"); add(meal.babyMenu, "아기");
     let sides: unknown;
     try { sides = JSON.parse(meal.sideDishes); } catch { sides = meal.sideDishes.split(","); }
     if (Array.isArray(sides)) for (const side of sides) if (typeof side === "string") add(side, "부찬");
   }
-  return NextResponse.json({ dishes: [...candidates.values()].sort((a,b) => a.name.localeCompare(b.name, "ko")), family });
+  return NextResponse.json({ dishes: [...candidates.values()]
+    .map(dish => ({ ...dish, catalogMatches: catalog.matches.get(`${dish.category}|${dish.name}`) ?? [] }))
+    .sort((a,b) => a.name.localeCompare(b.name, "ko")), family, catalogAvailable: catalog.available });
 }
 
 export async function POST(request: Request) {

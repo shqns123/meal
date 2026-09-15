@@ -103,6 +103,10 @@ function systemPrompt(ruleFiles) {
     "레시피가 필요하면 반드시 OpenRouter 웹 검색과 웹 본문 읽기를 먼저 사용한다. 모바일 네이버 블로그(m.blog.naver.com)를 우선하고, 네이버 블로그 또는 티스토리 원문을 실제로 확인한 뒤에만 sourceUrl, sourceTitle, sourceAuthor, sourceCheckedAt을 넣는다. URL을 추측하거나 만들지 않는다.",
     "블로그 문장과 이미지는 복사하지 말고 가족 기준의 재료·조리법으로 구조화한다.",
     "입력 컨텍스트의 outputContract를 정확히 지키고, 수량은 숫자와 단위로, 조리 단계는 '1. '부터 시작한다. 브로콜리·파프리카·피망은 재료뿐 아니라 메뉴명·출처 제목·메모를 포함한 저장 JSON 어디에도 넣지 않는다. 같은 주의 같은 재료는 반드시 한 가지 단위만 사용한다(예: 당근은 모두 g, 애호박은 모두 g).",
+    "dishPreferences의 lastPlannedAt은 해당 메뉴가 식단에 마지막으로 편성된 날짜다. 새 식단을 만들 때 최근 편성 메뉴의 반복 간격을 판단하는 참고 자료로 사용하되, 허용 여부·알레르기·사용자 요청보다 우선하지 않는다.",
+    "월간 컨텍스트의 menuCatalog는 만개의레시피에서 수집한 식사형태·조리계열·기본 메뉴·세부 메뉴 계층이다. selectionPreview는 AVOID 메뉴를 제외하고 ALLOW와 UNKNOWN 세부메뉴를 대상으로 최근 식단을 반영해 고른 후보이다. UNKNOWN은 미확인 상태 그대로 저장할 수 있으며 ALLOW로 추정하지 않는다. 기본 메뉴별 동일한 기본 확률과 세부 메뉴 30일·기본 메뉴 10~14일·유사메뉴그룹 5~8일·조리계열/주재료 2일 쿨다운을 참고한다. 월간 완성본에서는 이름만 다른 비슷한 주찬의 근접 반복, 조리법·주재료의 3일 연속 반복과 주간 쏠림을 피한다. 부찬 조합을 2~3일 유지하는 것은 의도된 반복이다.",
+    "카탈로그의 정확한 세부메뉴명을 사용한다. selectionPreview의 sides는 3일 조리 묶음 후보이며 부찬 조합을 유지하는 데 참고한다. 가족 기피(AVOID), 이번 주 기피, 알레르기와 금지 식재료는 선택하지 않는다. 기본메뉴의 취향을 세부메뉴로 자동 전파하지 않는다. cookingMethods와 ingredientCategories는 만개의레시피 상단 기본메뉴 태그에 직접 표시된 값만 담는다. 태그가 빈 항목의 조리계열·주재료는 식단 선택 단계의 임시 추정값이며 원본 태그나 정확한 레시피 재료·알레르기 판정 근거가 아니다. 세부메뉴의 실제 레시피 재료·조리법이 확인되면 그 정보를 우선한다.",
+    "월간 식단은 먼저 mealStyle을 배치하고 메뉴를 선택한다. MAIN_DISH는 주찬 중심, SOUP_MEAL은 soup에 국/탕/찌개와 main에 간단한 주찬을 모두 넣는다. NOODLE_DUMPLING과 RICE_PORRIDGE_TTEOK는 main에 한그릇 메뉴를 둔다. soup은 SOUP_MEAL에서만 넣는다.",
     "[AGENTS.md]", ruleFiles.agents, "[MEAL.md]", ruleFiles.meal,
   ].join("\n");
 }
@@ -284,7 +288,7 @@ intent는 UPDATE_MEALS, GENERATE_MONTH, RESET_MONTH, REGENERATE_RECIPES, ADD_REC
 이번 주는 ${task.weekStart}, 선택 월은 ${targetMonth}, 오늘은 ${currentKstDate()}다.
 레시피를 모두·전부·전체 삭제하라는 명시적 요청에만 all을 true로 한다.
 서로 독립된 변경이 여러 개면 actions에 각각 넣는다. 한 작업의 대상이 모호하면 CLARIFY 하나만 반환한다. 최대 20개다. 가격 데이터가 없는 상태에서 정확한 예산 상한을 요구하면 저장하지 말고 CLARIFY로 현재는 금액 준수를 보장할 수 없다고 답한다.
-형식: {"actions":[{"intent":"...","answer":"확인 질문 또는 빈 문자열","month":"YYYY-MM","weekStart":"YYYY-MM-DD 일요일","date":"YYYY-MM-DD 또는 null","dates":["YYYY-MM-DD"],"title":"레시피 제목 또는 null","category":"주찬|반찬|점심|null","all":false,"groceryName":"품목명 또는 null","quantity":1,"unit":"개","groceryCategory":"기타","purchased":true,"pantry":{"operation":"upsert|adjust|delete","name":"재료명","quantity":1,"unit":"g|kg|ml|L|개|팩|봉|병|캔|모|단|통|장|마리","category":"냉장|냉동|실온|기타","expiresAt":"YYYY-MM-DD 또는 null"},"preference":{"name":"정확한 메뉴명","category":"주찬|부찬|점심|아기","scope":"family|father|mother|child","usage":"UNKNOWN|ALLOW|AVOID (사용 여부를 말한 경우만)","familiarity":"UNKNOWN|FAMILIAR|UNFAMILIAR (익숙함을 말한 경우만)","note":"명시한 메모만"},"familyUpdate":{"role":"father|mother|child","name":null,"allergies":null,"chewingAbility":null,"spiceTolerance":null,"dietaryNotes":null},"weeklyReview":{"referenceDate":"YYYY-MM-DD","wantedFoods":null,"avoidFoods":null,"note":null},"dinnerDiningOut":null,"attendance":[{"role":"father|mother","lunchNotAtHome":true,"dinnerNotAtHome":false,"isWorking":null,"eatsAtCompany":null,"isAway":null,"note":null}]}]}`,
+형식: {"actions":[{"intent":"...","answer":"확인 질문 또는 빈 문자열","month":"YYYY-MM","weekStart":"YYYY-MM-DD 일요일","date":"YYYY-MM-DD 또는 null","dates":["YYYY-MM-DD"],"title":"레시피 제목 또는 null","category":"주찬|반찬|점심|null","all":false,"groceryName":"품목명 또는 null","quantity":1,"unit":"개","groceryCategory":"기타","purchased":true,"pantry":{"operation":"upsert|adjust|delete","name":"재료명","quantity":1,"unit":"g|kg|ml|L|개|팩|봉|병|캔|모|단|통|장|마리","category":"냉장|냉동|실온|기타","expiresAt":"YYYY-MM-DD 또는 null"},"preference":{"name":"정확한 메뉴명","category":"주찬|부찬|국/탕/찌개|한그릇|점심|아기","scope":"family|father|mother|child","usage":"UNKNOWN|ALLOW|AVOID (사용 여부를 말한 경우만)","familiarity":"UNKNOWN|FAMILIAR|UNFAMILIAR (익숙함을 말한 경우만)","note":"명시한 메모만"},"familyUpdate":{"role":"father|mother|child","name":null,"allergies":null,"chewingAbility":null,"spiceTolerance":null,"dietaryNotes":null},"weeklyReview":{"referenceDate":"YYYY-MM-DD","wantedFoods":null,"avoidFoods":null,"note":null},"dinnerDiningOut":null,"attendance":[{"role":"father|mother","lunchNotAtHome":true,"dinnerNotAtHome":false,"isWorking":null,"eatsAtCompany":null,"isAway":null,"note":null}]}]}`,
     `[사용자 요청]\n${task.message}\n[현재 주간 컨텍스트]\n${JSON.stringify(context(task.weekStart))}`,
     false,
   );
@@ -347,6 +351,8 @@ function preserveMonthBefore(payload, current, fromDate) {
       date: meal.date,
       lunch: meal.lunchPlan,
       main: meal.mainDish,
+      soup: meal.soupDish || undefined,
+      mealStyle: meal.mealStyle || "MAIN_DISH",
       sides: meal.sides,
       baby: meal.babyMenu || undefined,
       note: meal.cookingNote || undefined,
@@ -381,7 +387,7 @@ async function runChatMealChange(ruleFiles) {
   }).format(new Date());
   const result = await ask(
     systemPrompt(ruleFiles) +
-      "\n\n이번 작업은 AI 채팅에서 받은 실제 식단 변경 요청이다. 요청한 날짜만 바꾸고 날짜가 불명확하면 mealChanges를 비운 채 answer에 확인 질문을 작성한다. '7일부터 9일까지'는 선택 월의 7·8·9일을 모두 뜻한다. 각 mealChanges에는 기존 값을 유지하는 항목도 포함해 date, lunch, main, sides 두 개를 완전하게 반환한다. 레시피는 후속 작업에서 별도로 생성하므로 recipes는 만들지 않는다. JSON: {\"answer\":\"처리 결과 또는 확인 질문\",\"changeReason\":\"변경 이유\",\"mealChanges\":[...]}",
+      "\n\n이번 작업은 AI 채팅에서 받은 실제 식단 변경 요청이다. 요청한 날짜만 바꾸고 날짜가 불명확하면 mealChanges를 비운 채 answer에 확인 질문을 작성한다. '7일부터 9일까지'는 선택 월의 7·8·9일을 모두 뜻한다. 각 mealChanges에는 기존 값을 유지하는 항목도 포함해 date, mealStyle, lunch, main, soup(국/탕/찌개 중심일 때), sides 두 개를 완전하게 반환한다. 레시피는 후속 작업에서 별도로 생성하므로 recipes는 만들지 않는다. JSON: {\"answer\":\"처리 결과 또는 확인 질문\",\"changeReason\":\"변경 이유\",\"mealChanges\":[...]}",
     `[오늘]\n${today}\n[선택 월]\n${targetMonth}\n[월간 컨텍스트]\n${JSON.stringify(month)}\n[사용자 요청]\n${task.message}`,
     false,
   );
@@ -439,7 +445,7 @@ async function runChatMealChange(ruleFiles) {
     changeReason: String(requested.changeReason || task.message).slice(0, 1000),
     mealChanges: validatedChanges,
   };
-  publish("publish-days", writeInput("chat-days", combinedPayload), []);
+  const publishResult = JSON.parse(String(publish("publish-days", writeInput("chat-days", combinedPayload), [])));
   const weeks = [...new Set(dates.map(sundayForDate))];
   const failedRecipeWeeks = [];
   for (const weekStart of weeks) {
@@ -458,7 +464,9 @@ async function runChatMealChange(ruleFiles) {
     ? `식단은 모두 저장했지만 ${failedRecipeWeeks.join(", ")} 주차의 레시피와 장보기 갱신은 완료하지 못했습니다.`
     : "관련 레시피와 장보기도 다시 계산했습니다.";
   return {
-    answer: `${String(requested.answer || "").trim() || `${dates.join(", ")} 식단을 변경했습니다.`} ${recipeStatus}`,
+    answer: `${String(requested.answer || "").trim() || `${dates.join(", ")} 식단을 변경했습니다.`} ${recipeStatus}`
+      + (publishResult.overallQuality?.highWarnings?.length
+        ? ` 최종 식단 품질 ${publishResult.overallQuality.score}/100이며 높은 경고 ${publishResult.overallQuality.highWarnings.length}건이 남았습니다.` : ""),
     sources: citations(result.annotations),
   };
 }
@@ -484,10 +492,10 @@ async function runChatMonthAction(ruleFiles, decision) {
       (replaceFrom
         ? `${replaceFrom} 이전 식단은 existingMonthMeals와 완전히 동일하게 유지하고, ${replaceFrom}부터 월말까지만 새로 구성한다. `
         : "") +
-      "부찬 2개는 동일한 조합을 2~3일 연속 유지하고 특별한 이유 없이 매일 바꾸지 않는다. 레시피와 장보기는 만들지 않는다. 기존 월을 교체하더라도 날짜 상세의 가족 일정은 유지한다.",
+      "각 날짜에 mealStyle을 반드시 넣는다. 메인반찬 중심 4일, 국/탕/찌개 중심 1~2일, 면/만두 1일을 주간 출발점으로 사용하고 남은 날은 밥/죽/떡으로 채우되, 월간 날짜 수에 맞춰 고르게 배치한다. 부찬 2개는 동일한 조합을 2~3일 연속 유지하고 특별한 이유 없이 매일 바꾸지 않는다. 레시피와 장보기는 만들지 않는다. 기존 월을 교체하더라도 날짜 상세의 가족 일정은 유지한다.",
     false,
   );
-  const scope = `${month}의 모든 날짜를 한 번씩 포함하며 ${replaceFrom ? `${replaceFrom} 이전은 유지하고 그날부터 월말까지만 교체하는` : "월 전체를 교체하는"} 월간 식단이다. 부찬 조합은 2~3일씩 유지하며 레시피와 장보기는 만들지 않는다.`;
+  const scope = `${month}의 모든 날짜를 한 번씩 포함하며 ${replaceFrom ? `${replaceFrom} 이전은 유지하고 그날부터 월말까지만 교체하는` : "월 전체를 교체하는"} 월간 식단이다. 각 날짜에 유효한 mealStyle을 넣고, SOUP_MEAL에는 soup과 간단한 main을 모두 넣는다. AVOID 메뉴는 저장하지 않으며 UNKNOWN 메뉴는 사용할 수 있다. 부찬 조합은 2~3일씩 유지하며 레시피와 장보기는 만들지 않는다.`;
   const normalizeCandidate = (candidate) => normalizeMonthSideBatches(
     preserveMonthBefore(
       normalizeMonthPayload(candidate, month),
@@ -505,12 +513,15 @@ async function runChatMonthAction(ruleFiles, decision) {
     (candidate) => validate(
       "validate-month",
       normalizeCandidate(candidate),
-      ["--month", month, ...(replacing ? ["--replace", "true"] : [])],
+      ["--month", month, ...(replacing ? ["--replace", "true"] : []), ...(replaceFrom ? ["--replace-from", replaceFrom] : [])],
     ),
     false,
+    6,
+    true,
+    task.message,
   );
   payload = normalizeCandidate(payload);
-  publish(
+  const published = publish(
     "publish-month",
     writeInput(`chat-month-${month}`, payload),
     [
@@ -520,10 +531,13 @@ async function runChatMonthAction(ruleFiles, decision) {
       ...(replaceFrom ? ["--replace-from", replaceFrom] : []),
     ],
   );
+  const publishResult = JSON.parse(String(published));
+  const remainingWarnings = Array.isArray(publishResult.warnings) ? publishResult.warnings : [];
   return {
-    answer: replacing
+    answer: (replacing
       ? `${replaceFrom ?? month}부터 월말까지 식단을 새 구성으로 재설정했습니다. 변경 범위의 기존 레시피와 자동 장보기 항목은 정리했으며 이전 식단과 날짜별 가족 일정은 유지했습니다.`
-      : `${month} 월간 식단을 생성했습니다.`,
+      : `${month} 월간 식단을 생성했습니다.`)
+      + (remainingWarnings.length ? ` 식단 품질 경고 ${remainingWarnings.length}건이 남았습니다(점수 ${publishResult.qualityScore}/100): ${remainingWarnings.slice(0, 2).join("; ")}` : ""),
     sources: [],
   };
 }
@@ -861,25 +875,101 @@ function mergeReusableRecipes(payload, current) {
     recipes.set(recipe.category + "|" + recipe.title, recipe);
   return { ...payload, recipes: [...recipes.values()] };
 }
-async function completePayload(payload, current, ruleFiles, scope, runValidation, search, searchBudget = 6) {
+function mergeQualityRepair(original, revised, issues, protectedText = "", current = null) {
+  const affectedDates = new Set(issues.flatMap((issue) => issue.dates ?? []));
+  const revisedByDate = new Map((revised.mealChanges ?? []).map((change) => [change.date, change]));
+  const protectedMenu = (name) => name && String(protectedText).includes(String(name));
+  const sideSignature = (sides) => Array.isArray(sides) ? [...sides].sort().join("|") : "";
+  return {
+    ...original,
+    mealChanges: (original.mealChanges ?? []).map((change) => {
+      if (!affectedDates.has(change.date)) return change;
+      const replacement = revisedByDate.get(change.date);
+      if (!replacement) return change;
+      const dateIssues = issues.filter((issue) => (issue.dates ?? []).includes(change.date));
+      const changeMain = dateIssues.some((issue) => !issue.slot || ["main", "noodle", "rice"].includes(issue.slot));
+      const changeSoup = dateIssues.some((issue) => !issue.slot || issue.slot === "soup");
+      const changeSides = dateIssues.some((issue) => issue.slot === "side");
+      const repeatedSidePair = (current?.meals ?? []).some((meal) =>
+        meal.date !== change.date && Math.abs(Date.parse(meal.date) - Date.parse(change.date)) <= 86_400_000
+          && sideSignature(meal.sides) === sideSignature(change.sides));
+      return { ...change,
+        mealStyle: changeMain && !protectedMenu(change.main) ? replacement.mealStyle ?? change.mealStyle : change.mealStyle,
+        main: changeMain && !protectedMenu(change.main) ? replacement.main ?? change.main : change.main,
+        soup: changeSoup && !protectedMenu(change.soup) ? replacement.soup ?? change.soup : change.soup,
+        sides: changeSides && !repeatedSidePair && Array.isArray(replacement.sides) && change.sides?.every((name) => !protectedMenu(name))
+          ? replacement.sides : change.sides,
+      };
+    }),
+  };
+}
+async function completePayload(payload, current, ruleFiles, scope, runValidation, search, searchBudget = 6, repairQuality = false, protectedText = "") {
   let candidate = payload;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  let validFallback = null;
+  let qualityRepairIssues = [];
+  let qualityRepairTried = false;
+  let errorRepairs = 0;
+  while (true) {
     const validation = runValidation(candidate);
-    if (validation.valid) return candidate;
+    if (validation.valid) {
+      const highIssues = repairQuality && !qualityRepairTried
+        ? (validation.qualityIssues ?? []).filter((issue) => issue.severity === "HIGH")
+          .filter((issue) => (issue.dates ?? []).some((date) => {
+            const change = (candidate.mealChanges ?? []).find((meal) => meal.date === date);
+            if (!change) return false;
+            if (issue.slot === "side") {
+              const signature = (sides) => Array.isArray(sides) ? [...sides].sort().join("|") : "";
+              return !change.sides?.some((name) => String(protectedText).includes(String(name)))
+                && !(current?.meals ?? []).some((meal) => meal.date !== date
+                  && Math.abs(Date.parse(meal.date) - Date.parse(date)) <= 86_400_000
+                  && signature(meal.sides) === signature(change.sides));
+            }
+            if (issue.slot === "soup") return !change.soup || !String(protectedText).includes(change.soup);
+            return !change.main || !String(protectedText).includes(change.main);
+          }))
+          .sort((a, b) => Number(a.slot === "side") - Number(b.slot === "side")) : [];
+      if (!highIssues.length) return candidate;
+      validFallback = candidate;
+      qualityRepairIssues = highIssues;
+      qualityRepairTried = true;
+      try {
+        const result = await ask(
+          systemPrompt(ruleFiles) + "\n\n최종 식단은 저장 검증을 통과했지만 카탈로그 일치·역할·다양성 경고가 높다. 경고 날짜의 메뉴만 정확한 카탈로그 세부메뉴로 필요한 만큼 바꾼 완전한 JSON을 반환한다. 출처 확인된 레시피나 가족이 명시적으로 확인한 집 메뉴도 허용한다. 다른 날짜와 가족 일정, 명시적 메뉴 요청은 그대로 둔다. 부찬 2~3일 묶음은 유지하고, 이름만 바꾼 같은 유사메뉴그룹은 대체하지 않는다.",
+          "[현재 컨텍스트]\n" + JSON.stringify(current) + "\n[작업 범위]\n" + scope
+            + "\n[품질 점수]\n" + validation.qualityScore + "/100"
+            + "\n[높은 품질 경고]\n" + JSON.stringify(highIssues.slice(0, 24))
+            + "\n[보존할 명시 요청]\n" + protectedText
+            + "\n[수정할 JSON]\n" + JSON.stringify(candidate),
+          search,
+          searchBudget,
+        );
+        candidate = mergeQualityRepair(validFallback, modelJson(result.content), highIssues, protectedText, current);
+        continue;
+      } catch {
+        return validFallback;
+      }
+    }
+    if (errorRepairs >= 2) {
+      if (validFallback) return validFallback;
+      throw new Error("AI 결과가 저장 검증을 통과하지 못했습니다: "
+        + validationProblems(validation).join("; ").slice(0, 1800));
+    }
+    errorRepairs += 1;
     const problems = validationProblems(validation);
-    const result = await ask(
-      systemPrompt(ruleFiles) + "\n\n직전 JSON이 저장 검증에 실패했다. 아래 오류를 모두 해결한 완전한 교체 JSON만 반환한다. 레시피 출처 오류가 있으면 웹 검색과 원문 읽기로 확인하고, 확인하지 못한 URL을 추측해서 채우면 안 된다.",
-      "[현재 컨텍스트]\n" + JSON.stringify(current) + "\n[작업 범위]\n" + scope + "\n[검증 오류]\n" + problems.join("\n") + "\n[수정할 JSON]\n" + JSON.stringify(candidate),
-      search,
-      searchBudget,
-    );
-    candidate = modelJson(result.content);
+    try {
+      const result = await ask(
+        systemPrompt(ruleFiles) + "\n\n직전 JSON이 저장 검증에 실패했다. 아래 오류를 모두 해결한 완전한 교체 JSON만 반환한다. 레시피 출처 오류가 있으면 웹 검색과 원문 읽기로 확인하고, 확인하지 못한 URL을 추측해서 채우면 안 된다.",
+        "[현재 컨텍스트]\n" + JSON.stringify(current) + "\n[작업 범위]\n" + scope + "\n[검증 오류]\n" + problems.join("\n") + "\n[수정할 JSON]\n" + JSON.stringify(candidate),
+        search,
+        searchBudget,
+      );
+      const repaired = modelJson(result.content);
+      candidate = validFallback ? mergeQualityRepair(validFallback, repaired, qualityRepairIssues, protectedText, current) : repaired;
+    } catch (error) {
+      if (validFallback) return validFallback;
+      throw error;
+    }
   }
-  const validation = runValidation(candidate);
-  throw new Error(
-    "AI 결과가 저장 검증을 통과하지 못했습니다: " +
-      validationProblems(validation).join("; ").slice(0, 1800),
-  );
 }
 
 async function runChat() {
@@ -973,8 +1063,10 @@ async function runPlanner() {
         normalizeCandidate(candidate),
         ["--month", task.targetMonth],
       ),
-      false,
-    );
+    false,
+    6,
+    true,
+  );
     payload = normalizeCandidate(payload);
     publish("publish-month", writeInput("month-" + task.targetMonth, payload),
       ["--month", task.targetMonth, "--request-id", task.requestId]);
@@ -1011,6 +1103,9 @@ async function runPlanner() {
           ["--week", task.weekStart, "--date", change.date],
         ),
         false,
+        6,
+        true,
+        `${task.prompt || ""}\n${current.weeklyReview?.wantedFoods || ""}`,
       );
       dayPayload.recipes = [];
       publish("publish-day", writeInput("review-" + change.date, dayPayload),

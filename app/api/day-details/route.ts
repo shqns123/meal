@@ -99,6 +99,8 @@ async function loadDay(dateText: string) {
     meal: meal && {
       lunch: meal.lunchPlan,
       main: meal.mainDish,
+      soup: meal.soupDish,
+      mealStyle: meal.mealStyle,
       sides: parseList(meal.sideDishes),
       baby: meal.babyMenu,
       note: meal.cookingNote,
