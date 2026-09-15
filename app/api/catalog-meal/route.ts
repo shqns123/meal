@@ -7,7 +7,8 @@ import path from "node:path";
 export const runtime = "nodejs";
 type Scope = "month" | "week" | "day";
 function run(args: string[]) {
-  const result = spawnSync(process.execPath, ["scripts/mealctl.mjs", ...args], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 120_000 });
+  const root = process.env.MEAL_PLAN_ROOT?.trim() || process.cwd();
+  const result = spawnSync(process.execPath, [path.join(root, "scripts", "mealctl.mjs"), ...args], { cwd: root, encoding: "utf8", env: {...process.env, MEAL_PLAN_ROOT: root}, timeout: 120_000 });
   if (result.status !== 0) throw new Error(String(result.stderr || result.stdout || "식단 선택기에 실패했습니다.").trim());
   return String(result.stdout);
 }
