@@ -5,10 +5,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { preferenceContext, savePreference, validateMealPreferences } from "./dish-preferences.mjs";
-import { missingRecipeCoverage } from "../lib/recipe-coverage.mjs";
+import {
+  missingRecipeCoverage,
+  requiresLunchRecipe,
+} from "../lib/recipe-coverage.mjs";
 import { chooseCatalogMenu, flattenCatalog } from "../lib/catalog-selection.mjs";
 import { assessMealDiversity } from "../lib/meal-diversity.mjs";
 import { assessFinalMealQuality } from "../lib/final-meal-quality.mjs";
+import {
+  isVerifiedRecipeSource,
+  recipeSourceError,
+} from "../lib/recipe-source.mjs";
 
 const root = process.env.MEAL_PLAN_ROOT ?? process.cwd();
 const dbPath =
@@ -194,25 +201,27 @@ function reusableRecipesForPlans(mealRows) {
         addRequired(side, "반찬", date);
     }
     const day = new Date(`${date}T00:00:00Z`).getUTCDay();
-    if (
-      [0, 6].includes(day) &&
-      meal.lunchPlan &&
-      !String(meal.lunchPlan).includes("회사 식사")
-    )
+    if (requiresLunchRecipe(meal.lunchPlan, day))
       addRequired(meal.lunchPlan, "점심", date);
   }
 
-  const findRecipe = db.prepare(
+  const findRecipes = db.prepare(
     `SELECT * FROM "Recipe" WHERE "title"=? AND "category"=? AND "needsReview"=0
      AND ("category"='점심' OR ("sourceUrl" IS NOT NULL AND "sourceTitle" IS NOT NULL AND "sourceCheckedAt" IS NOT NULL))
-     ORDER BY "updatedAt" DESC LIMIT 1`,
+     ORDER BY "updatedAt" DESC`,
   );
   const findIngredients = db.prepare(
     `SELECT "name","amount","category" FROM "Ingredient" WHERE "recipeId"=? ORDER BY "id"`,
   );
   const reusable = [];
   for (const requirement of required.values()) {
-    const recipe = findRecipe.get(requirement.title, requirement.category);
+    const recipe = findRecipes
+      .all(requirement.title, requirement.category)
+      .find(
+        (candidate) =>
+          candidate.category === "점심" ||
+          isVerifiedRecipeSource(candidate.sourceUrl),
+      );
     if (!recipe) continue;
     const ingredients = findIngredients.all(recipe.id).map((ingredient) => {
       const match = String(ingredient.amount ?? "").match(
@@ -279,6 +288,33 @@ function loadContext(weekStart, seedSalt = "") {
     usage: catalogUsage(), seedSalt,
     styles: new Map(mealRows.map((meal) => [formatKst(meal.date), meal.mealStyle])),
   });
+  const weeklyPlans = weeklyPreview.map((item) => ({
+    date: item.date,
+    mealStyle: item.mealStyle,
+    main: item.main?.name,
+    soup: item.soup?.name,
+    sides: item.sides.map((side) => side.name),
+  }));
+  const weeklyDiversity = assessMealDiversity({
+    plans: weeklyPlans,
+    previousPlans: recentRows.map((item) => ({
+      ...item,
+      date: formatKst(item.date),
+      sides: parseJsonList(item.sideDishes),
+    })),
+    catalog: catalogItems,
+  });
+  const weeklyFinal = assessFinalMealQuality({
+    plans: weeklyPlans,
+    catalog: catalogItems,
+    knownMenus: confirmedMenuKeys(),
+    verifiedRecipes: verifiedRecipeKeys(),
+    diversityIssues: weeklyDiversity.issues,
+  });
+  const weeklyQuality = {
+    summary: { ...weeklyDiversity.summary, finalScore: weeklyFinal.score },
+    issues: [...weeklyDiversity.issues, ...weeklyFinal.issues],
+  };
   const schedules = db
     .prepare(
       `SELECT s."date",s."memberId",s."isWorking",s."eatsAtCompany",s."isAway",s."lunchNotAtHome",s."dinnerNotAtHome",s."note",m.name AS memberName,m.role AS memberRole FROM "FamilySchedule" s JOIN "FamilyMember" m ON m.id=s.memberId WHERE s.date>=? AND s.date<? ORDER BY s.date`,
@@ -310,7 +346,7 @@ function loadContext(weekStart, seedSalt = "") {
   return {
     schemaVersion: "meal-week.v1",
     dishPreferences: planningPreferenceContext(),
-    menuCatalog: catalogContext({ items: catalogItems, selectionPreview: weeklyPreview }),
+    menuCatalog: catalogContext({ items: catalogItems, selectionPreview: weeklyPreview, previewDiversity: weeklyQuality }),
     weekStart,
     weekEnd,
     timezone: "Asia/Seoul",
@@ -390,7 +426,7 @@ function loadContext(weekStart, seedSalt = "") {
           babySplitStep: "string",
           storageMethod: "string",
           consumeWithin: "string",
-          sourceUrl: "https://verified-blog-post",
+          sourceUrl: "https://www.10000recipe.com/recipe/1234567",
           sourceTitle: "verified page title",
           sourceAuthor: "author or null",
           sourceCheckedAt: "YYYY-MM-DD",
@@ -412,21 +448,35 @@ function loadMonthContext(month, seedSalt = "") {
   const recentMeals = db.prepare('SELECT "monthKey","date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "monthKey">=? AND "monthKey"<? ORDER BY "date"').all(shiftMonth(selectedMonth, -3), selectedMonth);
   const schedules = db.prepare('SELECT s."date",s."isWorking",s."eatsAtCompany",s."isAway",s."lunchNotAtHome",s."dinnerNotAtHome",s."note",m."name" AS "memberName",m."role" AS "memberRole" FROM "FamilySchedule" s JOIN "FamilyMember" m ON m."id"=s."memberId" WHERE s."date">=? AND s."date"<? ORDER BY s."date"').all(toMillis(start), toMillis(endExclusive));
   const catalogItems = loadCatalogItems();
-  const planningHistory = catalogHistory(catalogItems, [...recentMeals, ...previousMeals]);
+  // recentMeals already contains the previous month. Adding previousMeals again
+  // would double-count side batches and distort cooldown weights.
+  const planningHistory = catalogHistory(catalogItems, recentMeals);
   const selectionPreview = catalogSelectionPreview({ catalog: catalogItems, dates, history: planningHistory, month: selectedMonth, usage: catalogUsage(), seedSalt });
-  const previewDiversity = assessMealDiversity({
-    plans: selectionPreview.map((item) => ({
+  const previewPlans = selectionPreview.map((item) => ({
       date: item.date, mealStyle: item.mealStyle,
       main: item.main?.name, soup: item.soup?.name,
       sides: item.sides.map((side) => side.name),
-    })),
+    }));
+  const previewDiversity = assessMealDiversity({
+    plans: previewPlans,
     previousPlans: previousMeals.map((item) => ({ ...item, date: formatKst(item.date), sides: parseJsonList(item.sideDishes) })),
     catalog: catalogItems,
   });
+  const previewFinal = assessFinalMealQuality({
+    plans: previewPlans,
+    catalog: catalogItems,
+    knownMenus: confirmedMenuKeys(),
+    verifiedRecipes: verifiedRecipeKeys(),
+    diversityIssues: previewDiversity.issues,
+  });
+  const previewQuality = {
+    summary: { ...previewDiversity.summary, finalScore: previewFinal.score },
+    issues: [...previewDiversity.issues, ...previewFinal.issues],
+  };
   return {
     schemaVersion: "meal-month.v1",
     dishPreferences: planningPreferenceContext(),
-    menuCatalog: catalogContext({ items: catalogItems, selectionPreview, previewDiversity }),
+    menuCatalog: catalogContext({ items: catalogItems, selectionPreview, previewDiversity: previewQuality }),
     weeklyReviews: db.prepare('SELECT * FROM "WeeklyReview" WHERE "weekStart">=? AND "weekStart"<?').all(toMillis(sundayFor(start)), toMillis(endExclusive)).map(review => ({...review, weekStart: formatKst(review.weekStart), referenceDate: review.referenceDate ? formatKst(review.referenceDate) : formatKst(review.weekStart)})),
     month: selectedMonth,
     dates,
@@ -456,6 +506,25 @@ const banned = [
     .map((item) => item.trim())
     .filter((item) => item && !/^(없음|없어요|해당 없음)$/i.test(item)),
 ];
+const pantrySelectionItems = db.prepare(
+  'SELECT "name","quantity","expiresAt" FROM "PantryItem" WHERE "quantity">0 ORDER BY "expiresAt"',
+).all();
+function pantrySelectionBoost(item, date) {
+  const text = `${item.baseName} ${item.variantName}`;
+  const target = toMillis(date);
+  let boost = 1;
+  for (const pantry of pantrySelectionItems) {
+    const name = normalizeName(pantry.name);
+    if (!name || !text.includes(name)) continue;
+    boost += 0.35;
+    if (pantry.expiresAt) {
+      const days = (Number(pantry.expiresAt) - target) / 86_400_000;
+      if (days <= 3) boost += 0.75;
+      else if (days <= 7) boost += 0.4;
+    }
+  }
+  return Math.min(boost, 3);
+}
 const mealStyles = new Set(["MAIN_DISH", "SOUP_MEAL", "NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"]);
 function mealStyleFor(change, current = "MAIN_DISH") {
   return Object.hasOwn(change ?? {}, "mealStyle")
@@ -479,8 +548,6 @@ const basicStock = new Set([
   "다진 마늘",
   "후추",
 ]);
-const allowedBlogHosts = new Set(["blog.naver.com", "m.blog.naver.com"]);
-
 function validatePayload(
   payload,
   weekStart,
@@ -629,7 +696,7 @@ function validatePayload(
     if (!String(recipe.consumeWithin ?? "").trim())
       errors.push(`${at}.consumeWithin is required.`);
     if (["주찬", "반찬"].includes(recipe.category) || recipe.sourceUrl)
-      validateBlogSource(recipe, at, errors);
+      validateRecipeSource(recipe, at, errors);
     const text = JSON.stringify(recipe);
     for (const item of banned)
       if (text.includes(item))
@@ -652,11 +719,7 @@ function validatePayload(
         if (!coverage.has(`${date}|${dish}`))
           errors.push(`Missing recipe coverage for ${date}: ${dish}`);
     const day = new Date(`${date}T00:00:00Z`).getUTCDay();
-    if (
-      [0, 6].includes(day) &&
-      plan.lunchPlan &&
-      !plan.lunchPlan.includes("회사 식사")
-    ) {
+    if (requiresLunchRecipe(plan.lunchPlan, day)) {
       const hasLunch = (payload.recipes ?? []).some(
         (recipe) =>
           recipe.category === "점심" && recipe.plannedDates?.includes(date),
@@ -850,12 +913,13 @@ function confirmedMenuKeys() {
 function verifiedRecipeKeys(additionalRecipes = []) {
   const keys = new Set();
   const stored = db.prepare(
-    `SELECT "title","category" FROM "Recipe"
+    `SELECT "title","category","sourceUrl" FROM "Recipe"
      WHERE "sourceUrl" IS NOT NULL AND TRIM("sourceUrl")<>''
        AND "sourceCheckedAt" IS NOT NULL AND "needsReview"=0`,
   ).all();
   for (const recipe of [...stored, ...additionalRecipes.filter((item) =>
     item && item.sourceUrl && item.sourceCheckedAt && ["주찬", "반찬"].includes(item.category))]) {
+    if (!isVerifiedRecipeSource(recipe.sourceUrl)) continue;
     const name = normalizeName(recipe.title);
     const category = recipe.category === "반찬" ? "부찬" : recipe.category;
     keys.add(`${category}|${name}`);
@@ -887,18 +951,32 @@ function catalogHistory(items, meals) {
     byVariant.set(key, matches);
   }
   const history = [];
+  let previousSideSignature = null;
+  let previousSideIndexes = [];
   for (const meal of meals) {
     const mainCategories = meal.mealStyle === "NOODLE_DUMPLING" ? ["면/만두"]
       : meal.mealStyle === "RICE_PORRIDGE_TTEOK" ? ["밥/죽/떡"] : ["메인반찬"];
-    const slots = [
+    const mainSlots = [
       { name: meal.mainDish, categories: mainCategories },
       { name: meal.soupDish, categories: ["국/탕", "찌개"] },
-      ...parseJsonList(meal.sideDishes).map((name) => ({ name, categories: ["밑반찬"] })),
     ];
+    const sideNames = parseJsonList(meal.sideDishes);
+    const sideSignature = sideNames.map(normalizeName).sort().join("|");
+    const slots = [...mainSlots, ...sideNames.map((name) => ({ name, categories: ["밑반찬"], side: true }))];
+    const nextSideIndexes = [];
     for (const slot of slots) {
       const matches = byVariant.get(normalizeName(slot.name)) ?? [];
       const item = matches.find((candidate) => slot.categories.includes(candidate.sourceCategory)) ?? matches[0];
-      if (item) history.push({
+      if (!item) continue;
+      if (slot.side && sideSignature && sideSignature === previousSideSignature) {
+        // A repeated 2–3 day side combination is one cooking batch. Keep one
+        // history entry per dish, but move its date to the last eating day.
+        const index = previousSideIndexes[nextSideIndexes.length];
+        if (index !== undefined) history[index].date = formatKst(meal.date);
+        nextSideIndexes.push(index);
+        continue;
+      }
+      history.push({
         date: formatKst(meal.date),
         variantName: item.variantName,
         baseName: item.baseName,
@@ -909,16 +987,31 @@ function catalogHistory(items, meals) {
         flavorFamily: item.flavorFamily,
         primaryIngredient: item.primaryIngredient,
       });
+      if (slot.side) nextSideIndexes.push(history.length - 1);
     }
+    previousSideSignature = sideSignature || null;
+    previousSideIndexes = nextSideIndexes;
   }
   return history;
 }
+function matchesSelectionRole(item, role) {
+  const name = normalizeName(item.variantName);
+  const soupLike = /찌개|전골|국$|탕$/.test(name);
+  const oneBowlLike = /(?:볶음)?밥|덮밥|김밥|죽$|국수|우동|칼국수|수제비|라면|파스타|떡볶이/.test(name);
+  if (role === "SIDE") return !soupLike && !oneBowlLike;
+  if (role === "MAIN") return !soupLike && !oneBowlLike;
+  return true;
+}
 function isCatalogItemAllowed(item) {
   const nonMealPatterns = /양념장|소스|드레싱|카나페|도시락|도시락반찬|만들기팁|보관법/;
-  const sideMealPatterns = /(?:볶음)?밥|덮밥|김밥|죽|국수|우동|칼국수|수제비|라면|파스타|떡볶이/;
+  const extremeSpicePatterns = /불닭|마라|핵불|극매운/;
   return !nonMealPatterns.test(item.variantName)
-    && !(item.sourceCategory === "밑반찬" && sideMealPatterns.test(item.variantName))
-    && !banned.some((ingredient) => ingredient && item.variantName.includes(ingredient));
+    && !extremeSpicePatterns.test(item.variantName)
+    && !banned.some((ingredient) => ingredient && (
+      item.variantName.includes(ingredient)
+      || item.baseName.includes(ingredient)
+      || item.ingredientCategories.some((category) => category.includes(ingredient))
+    ));
 }
 function weeklyAvoidForDate(date) {
   const review = db.prepare('SELECT "referenceDate","weekStart","avoidFoods" FROM "WeeklyReview" WHERE "weekStart"=?')
@@ -928,12 +1021,17 @@ function weeklyAvoidForDate(date) {
 }
 function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage, pickSides }) {
   const pick = (sourceCategories, role, excludeCookingFamily = null) => {
-    const weeklyAvoid = weeklyAvoidForDate(date);
+    const selectionRole = role.startsWith("side") ? "SIDE"
+      : role === "soup" ? "SOUP"
+        : sourceCategories.includes("메인반찬") ? "MAIN" : "ONE_BOWL";
+    const weeklyAvoid = weeklyAvoidForDate(date).split(/[,/·\n]/).map((item) => item.trim()).filter(Boolean);
     const selected = chooseCatalogMenu({
       catalog: catalog.filter((item) => isCatalogItemAllowed(item)
+        && matchesSelectionRole(item, selectionRole)
         && usage.get(`${catalogRole(item.sourceCategory)}|${normalizeName(item.variantName)}`) !== "AVOID"
         && (!excludeCookingFamily || item.cookingFamily !== excludeCookingFamily)
-        && !weeklyAvoid.includes(item.variantName)),
+        && !weeklyAvoid.some((avoid) => item.variantName.includes(avoid) || item.baseName.includes(avoid)))
+        .map((item) => ({ ...item, selectionBoost: pantrySelectionBoost(item, date) })),
       history, sourceCategories, date, seed: `${seed}:${role}`,
     });
     if (!selected) return null;
@@ -1011,7 +1109,14 @@ function catalogSelectionPreview({ catalog, dates, history, month, usage, styles
   });
 }
 function generateCatalogDay(date, slot = "all", seedSalt = "") {
-  const week = sundayFor(date); const current = loadContext(week, seedSalt);
+  const week = sundayFor(date);
+  let current = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const candidate = loadContext(week, `${seedSalt}:${attempt}`);
+    if (!current || (candidate.menuCatalog.selectionPreviewQuality?.warnings?.length ?? Infinity)
+      < (current.menuCatalog.selectionPreviewQuality?.warnings?.length ?? Infinity)) current = candidate;
+    if (!(candidate.menuCatalog.selectionPreviewQuality?.warnings?.length)) break;
+  }
   const selection = current.menuCatalog.selectionPreview.find((entry) => entry.date === date);
   const existing = db.prepare('SELECT "lunchPlan","mainDish","soupDish","mealStyle","sideDishes","cookingNote" FROM "MealPlan" WHERE "date"=?').get(toMillis(date));
   if (!selection || !existing) fail(`${date}의 식단 또는 카탈로그 후보를 찾지 못했습니다.`);
@@ -1036,18 +1141,55 @@ function generateCatalogDay(date, slot = "all", seedSalt = "") {
   return { schemaVersion: "meal-week.v1", weekStart: week, changeReason: "카탈로그 선택기로 식단을 다시 골랐습니다.", recipes: [], mealChanges: changes };
 }
 function generateCatalogMonth(month, seedSalt = "") {
-  const current = loadMonthContext(month, seedSalt);
+  let current = null;
+  // A high quality warning triggers one automatic reselection pass. Keep the
+  // better result if the warning cannot be removed with available candidates.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const candidate = loadMonthContext(month, `${seedSalt}:${attempt}`);
+    if (!current || (candidate.menuCatalog.selectionPreviewQuality?.warnings?.length ?? Infinity)
+      < (current.menuCatalog.selectionPreviewQuality?.warnings?.length ?? Infinity)) current = candidate;
+    if (!(candidate.menuCatalog.selectionPreviewQuality?.warnings?.length)) break;
+  }
   if (!current.menuCatalog.available) fail(current.menuCatalog.reason || "카탈로그를 읽지 못했습니다.");
+  const catalogItems = loadCatalogItems();
+  const lunchHistory = catalogHistory(catalogItems, current.recentMonths);
+  const usage = catalogUsage();
   return {
     schemaVersion: "meal-month.v1", month,
     changeReason: "카탈로그 선택기로 월간 식단을 구성했습니다.",
     mealChanges: current.menuCatalog.selectionPreview.map((selection) => {
-      const weekday = new Date(`${selection.date}T00:00:00Z`).getUTCDay();
-      return { date: selection.date, lunch: weekday === 0 || weekday === 6 ? "주말 간단식" : "회사 식사",
+      const lunch = catalogLunchForDate(selection.date, current, catalogItems, lunchHistory, usage, seedSalt);
+      return { date: selection.date, lunch,
         mealStyle: selection.mealStyle, main: selection.main?.name, soup: selection.soup?.name ?? null,
         sides: selection.sides.map((item) => item.name), note: "카탈로그 세부메뉴 자동 선택" };
     }), recipes: [],
   };
+}
+function catalogLunchForDate(date, current, catalog, history, usage, seedSalt) {
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+  const daySchedules = current.schedules.filter((item) => item.date === date && ["father", "mother"].includes(item.memberRole));
+  if (![0, 6].includes(weekday)) {
+    if (!daySchedules.length) return "회사 식사";
+    if (daySchedules.every((item) => item.isAway || item.lunchNotAtHome || (item.isWorking && item.eatsAtCompany))) {
+      return daySchedules.every((item) => item.isWorking && item.eatsAtCompany) ? "회사 식사" : "외식";
+    }
+  } else if (daySchedules.length && daySchedules.every((item) => item.isAway || item.lunchNotAtHome)) {
+    return "외식";
+  }
+  const weeklyAvoid = weeklyAvoidForDate(date).split(/[,/·\n]/).map((item) => item.trim()).filter(Boolean);
+  const selected = chooseCatalogMenu({
+    catalog: catalog.filter((item) => isCatalogItemAllowed(item)
+      && usage.get(`한그릇|${normalizeName(item.variantName)}`) !== "AVOID"
+      && !weeklyAvoid.some((avoid) => item.variantName.includes(avoid) || item.baseName.includes(avoid)))
+      .map((item) => ({ ...item, selectionBoost: pantrySelectionBoost(item, date) })),
+    history,
+    sourceCategories: ["밥/죽/떡", "면/만두"],
+    date,
+    seed: `${date}:${seedSalt}:lunch`,
+  });
+  if (!selected) return "외식";
+  history.push({ date, ...selected });
+  return selected.variantName;
 }
 function catalogContext({ items = null, selectionPreview = [], previewDiversity = null } = {}) {
   const catalogItems = items ?? loadCatalogItems();
@@ -1136,21 +1278,9 @@ function refreshDishHistory() {
     throw error;
   }
 }
-function validateBlogSource(recipe, at, errors) {
-  if (!String(recipe.sourceUrl ?? "").trim()) {
-    errors.push(`${at}.sourceUrl is required for 주찬 and 반찬.`);
-    return;
-  }
-  try {
-    const source = new URL(recipe.sourceUrl);
-    const host = source.hostname.toLowerCase();
-    if (source.protocol !== "https:")
-      errors.push(`${at}.sourceUrl must use https.`);
-    if (!allowedBlogHosts.has(host) && !host.endsWith(".tistory.com"))
-      errors.push(`${at}.sourceUrl must be a Naver Blog or Tistory post.`);
-  } catch {
-    errors.push(`${at}.sourceUrl must be a valid URL.`);
-  }
+function validateRecipeSource(recipe, at, errors) {
+  const sourceError = recipeSourceError(recipe.sourceUrl);
+  if (sourceError) errors.push(`${at}.${sourceError}`);
   if (!String(recipe.sourceTitle ?? "").trim())
     errors.push(`${at}.sourceTitle is required.`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(recipe.sourceCheckedAt ?? ""))

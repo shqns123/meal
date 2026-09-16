@@ -17,6 +17,7 @@
     "test:catalog-selection": "node scripts/test-catalog-selection.mjs",
     "test:meal-diversity": "node scripts/test-meal-diversity.mjs",
     "test:final-meal-quality": "node scripts/test-final-meal-quality.mjs",
+    "test:recipe-source": "node scripts/test-recipe-source.mjs",
     "db:agent-migrate": "node scripts/migrate-agent-workflow.mjs",
     "db:attendance-migrate": "node scripts/migrate-attendance.mjs",
     "mealctl": "node scripts/mealctl.mjs",

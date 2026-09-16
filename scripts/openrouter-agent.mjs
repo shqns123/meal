@@ -69,8 +69,8 @@ async function ask(system, user, search = false, searchBudget = 12) {
       plugins: [{ id: "response-healing" }],
       ...(search && process.env.OPENROUTER_ENABLE_WEB_SEARCH !== "false"
         ? {
-            // Recipes must be grounded in Korean blog originals. Domain limits
-            // also nudge desktop Naver URLs toward their mobile counterpart.
+            // Recipe ingredients and steps must be grounded in an opened
+            // 10000recipe individual recipe page.
             tools: [{
               type: "openrouter:web_search",
               parameters: {
@@ -79,7 +79,7 @@ async function ask(system, user, search = false, searchBudget = 12) {
                 max_uses: searchBudget,
                 max_total_results: Math.min(searchBudget * 3, 45),
                 search_context_size: "medium",
-                allowed_domains: ["m.blog.naver.com", "blog.naver.com", "*.tistory.com"],
+                allowed_domains: ["www.10000recipe.com", "m.10000recipe.com"],
               },
             }, { type: "openrouter:web_fetch" }],
             max_tool_calls: Math.min(searchBudget * 2 + 4, 30),
@@ -100,8 +100,8 @@ async function ask(system, user, search = false, searchBudget = 12) {
 function systemPrompt(ruleFiles) {
   return [
     "당신은 가족 식단 앱의 자동 게시 작업자입니다. 설명 없이 유효한 JSON 객체만 반환합니다.",
-    "레시피가 필요하면 반드시 OpenRouter 웹 검색과 웹 본문 읽기를 먼저 사용한다. 모바일 네이버 블로그(m.blog.naver.com)를 우선하고, 네이버 블로그 또는 티스토리 원문을 실제로 확인한 뒤에만 sourceUrl, sourceTitle, sourceAuthor, sourceCheckedAt을 넣는다. URL을 추측하거나 만들지 않는다.",
-    "블로그 문장과 이미지는 복사하지 말고 가족 기준의 재료·조리법으로 구조화한다.",
+    "레시피가 필요하면 반드시 OpenRouter 웹 검색과 웹 본문 읽기를 먼저 사용한다. 메뉴명과 일치하는 만개의레시피의 개별 레시피 페이지를 실제로 열고, 그 페이지의 재료명·재료량·인분·조리 순서를 확인한 뒤에만 sourceUrl, sourceTitle, sourceAuthor, sourceCheckedAt을 넣는다. sourceUrl은 https://www.10000recipe.com/recipe/{숫자} 또는 같은 형태의 모바일 주소여야 하며 검색 결과·카테고리 페이지 URL은 저장하지 않는다. URL을 추측하거나 만들지 않는다.",
+    "만개의레시피 원문의 재료와 분량을 가족의 실제 식사 인원에 맞게 환산하고 단위를 구조화한다. 원문 문장과 이미지는 복사하지 말고 조리 순서를 의미가 유지되는 범위에서 다시 작성한다. 정확한 세부메뉴와 일치하는 개별 레시피를 찾지 못하면 비슷한 메뉴로 대체하지 말고 출처 검증 실패로 남긴다.",
     "입력 컨텍스트의 outputContract를 정확히 지키고, 수량은 숫자와 단위로, 조리 단계는 '1. '부터 시작한다. 브로콜리·파프리카·피망은 재료뿐 아니라 메뉴명·출처 제목·메모를 포함한 저장 JSON 어디에도 넣지 않는다. 같은 주의 같은 재료는 반드시 한 가지 단위만 사용한다(예: 당근은 모두 g, 애호박은 모두 g).",
     "dishPreferences의 lastPlannedAt은 해당 메뉴가 식단에 마지막으로 편성된 날짜다. 새 식단을 만들 때 최근 편성 메뉴의 반복 간격을 판단하는 참고 자료로 사용하되, 허용 여부·알레르기·사용자 요청보다 우선하지 않는다.",
     "월간 컨텍스트의 menuCatalog는 만개의레시피에서 수집한 식사형태·조리계열·기본 메뉴·세부 메뉴 계층이다. selectionPreview는 AVOID 메뉴를 제외하고 ALLOW와 UNKNOWN 세부메뉴를 대상으로 최근 식단을 반영해 고른 후보이다. UNKNOWN은 미확인 상태 그대로 저장할 수 있으며 ALLOW로 추정하지 않는다. 기본 메뉴별 동일한 기본 확률과 세부 메뉴 30일·기본 메뉴 10~14일·유사메뉴그룹 5~8일·조리계열/주재료 2일 쿨다운을 참고한다. 월간 완성본에서는 이름만 다른 비슷한 주찬의 근접 반복, 조리법·주재료의 3일 연속 반복과 주간 쏠림을 피한다. 부찬 조합을 2~3일 유지하는 것은 의도된 반복이다.",

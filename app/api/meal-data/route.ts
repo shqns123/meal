@@ -73,7 +73,7 @@ export async function GET(request: Request) {
         ),
         tags: [
           isSideDish ? "부찬" : "주찬",
-          ...(recipe.sourceUrl ? ["블로그 참고"] : []),
+          ...(recipe.sourceUrl ? ["레시피 원문 참고"] : []),
           ...(recipe.needsReview ? ["조리 순서 보완 필요"] : []),
         ],
         sourceUrl: recipe.sourceUrl,
@@ -99,8 +99,24 @@ export async function GET(request: Request) {
       category: item.category,
       done: item.purchased,
       usePlan: item.usePlan,
+      useDates: shoppingUseDates(item.usePlan, week),
     })),
   });
+}
+
+function shoppingUseDates(usePlan: string, weekStart: string) {
+  const start = new Date(`${weekStart}T00:00:00Z`).getTime();
+  const end = start + 6 * 86_400_000;
+  const startYear = Number(weekStart.slice(0, 4));
+  const dates = new Set<string>();
+  for (const match of usePlan.matchAll(/(?:^|\s·\s)(\d{2})-(\d{2})(?=\s)/g)) {
+    for (const year of [startYear - 1, startYear, startYear + 1]) {
+      const date = `${year}-${match[1]}-${match[2]}`;
+      const timestamp = new Date(`${date}T00:00:00Z`).getTime();
+      if (timestamp >= start && timestamp <= end) dates.add(date);
+    }
+  }
+  return [...dates].sort();
 }
 
 function parseList(value: string): string[] {

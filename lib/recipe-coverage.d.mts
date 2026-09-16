@@ -1,1 +1,2 @@
 export function missingRecipeCoverage(plans: {date: Date | number | string; mainDish: string | null; sideDishes: string; dinnerDiningOut: boolean | number; lunchPlan: string | null}[], recipes: {title: string; category: string; plannedDates: string; instructions: string; needsReview: boolean | number; sourceUrl?: string | null; sourceTitle?: string | null; sourceCheckedAt?: Date | number | string | null; ingredients: {amount: string}[]}[]): string[];
+export function requiresLunchRecipe(lunchPlan: string | null | undefined, weekday: number): boolean;

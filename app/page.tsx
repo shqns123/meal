@@ -70,6 +70,8 @@ type Grocery = {
   name: string;
   category: string;
   done: boolean;
+  usePlan?: string;
+  useDates?: string[];
 };
 type AgentRequest = {
   prompt: string;
@@ -480,7 +482,7 @@ export default function Home() {
                 setAgentRequest({
                   action: "REGENERATE_RECIPES",
                   weekStart: currentWeek,
-                  prompt: `${currentWeek}부터 ${addDaysLocal(currentWeek, 6)}까지의 식단 메뉴는 변경하지 말고, 이 주차의 주찬·부찬·필요한 주말 점심 레시피만 새로 생성해줘. 해당 주차에 속하지 않는 기존 레시피는 건드리지 말고, 각 메뉴마다 실제로 확인한 블로그 원문을 근거로 정확한 분량, 번호 조리 순서, 아기 분리 조리, 보관 방법을 작성해 전체 주차 검증 후 게시해줘. 장보기는 이 요청에서 변경하지 마.`,
+                  prompt: `${currentWeek}부터 ${addDaysLocal(currentWeek, 6)}까지의 식단 메뉴는 변경하지 말고, 이 주차의 주찬·부찬·필요한 주말 점심 레시피만 새로 생성해줘. 해당 주차에 속하지 않는 기존 레시피는 건드리지 말고, 각 메뉴마다 실제로 확인한 만개의레시피 개별 페이지를 근거로 정확한 분량, 번호 조리 순서, 아기 분리 조리, 보관 방법을 작성해 전체 주차 검증 후 게시해줘. 장보기는 이 요청에서 변경하지 마.`,
                 })
               }
             />
@@ -1246,8 +1248,8 @@ function Recipes({
                 >
                   <ExternalLink size={13} />
                   {recipe.sourceAuthor
-                    ? `${recipe.sourceAuthor} 블로그 원문`
-                    : "블로그 원문 보기"}
+                    ? `${recipe.sourceAuthor} 레시피 원문`
+                    : "레시피 원문 보기"}
                 </a>
               )}
             </CardContent>
@@ -1376,8 +1378,8 @@ function RecipeModal({ recipe, close }: { recipe: Recipe; close: () => void }) {
           >
             <ExternalLink size={15} />
             {recipe.sourceAuthor
-              ? `${recipe.sourceAuthor} 블로그 원문 보기`
-              : "블로그 원문 보기"}
+              ? `${recipe.sourceAuthor} 레시피 원문 보기`
+              : "레시피 원문 보기"}
           </a>
         )}
       </CardContent>
@@ -1403,9 +1405,29 @@ function GroceryList({
 }) {
   const [name, setName] = useState("");
   const [category, setCategory] = useState("기타");
+  const [categoryFilter, setCategoryFilter] = useState("전체");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const remaining = grocery.filter((i) => !i.done).length;
+  const categoryFilters = useMemo(
+    () => [
+      "전체",
+      ...[...new Set(grocery.map((item) => groceryCategory(item.category)))].sort(
+        (left, right) =>
+          groceryCategoryOrder(left) - groceryCategoryOrder(right) ||
+          left.localeCompare(right, "ko"),
+      ),
+    ],
+    [grocery],
+  );
+  const activeCategoryFilter = categoryFilters.includes(categoryFilter)
+    ? categoryFilter
+    : "전체";
+  const visibleGrocery = grocery.filter(
+    (item) =>
+      activeCategoryFilter === "전체" ||
+      groceryCategory(item.category) === activeCategoryFilter,
+  );
   const request = async (url: string, init: RequestInit) => {
     const response = await fetch(url, init);
     const data = await response.json();
@@ -1473,12 +1495,14 @@ function GroceryList({
       );
     }
   };
-  const groups = grocery.reduce<Record<string, Grocery[]>>(
-    (acc, item) => ({
-      ...acc,
-      [item.category]: [...(acc[item.category] ?? []), item],
-    }),
-    {},
+  const groups = visibleGrocery.reduce<Record<string, Grocery[]>>((acc, item) => {
+    const key = item.useDates?.[0] ??
+      (item.usePlan === "직접 추가" ? "manual" : "unscheduled");
+    (acc[key] ??= []).push(item);
+    return acc;
+  }, {});
+  const groupedEntries = Object.entries(groups).sort(([left], [right]) =>
+    groceryGroupOrder(left).localeCompare(groceryGroupOrder(right)),
   );
   return (
     <>
@@ -1498,6 +1522,40 @@ function GroceryList({
       </PageTitle>
       <Card>
         <CardContent>
+          {grocery.length > 0 && (
+            <div
+              className="-mx-1 mb-5 overflow-x-auto px-1 pb-1"
+              role="group"
+              aria-label="품목 분류 필터"
+            >
+              <div className="flex w-max min-w-full gap-2">
+                {categoryFilters.map((filter) => {
+                  const selected = activeCategoryFilter === filter;
+                  const count = filter === "전체"
+                    ? grocery.length
+                    : grocery.filter(
+                        (item) => groceryCategory(item.category) === filter,
+                      ).length;
+                  return (
+                    <button
+                      key={filter}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => setCategoryFilter(filter)}
+                      className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${
+                        selected
+                          ? "bg-[#e6f3fe] text-[#0068c9]"
+                          : "bg-black/[.045] text-black/60 hover:bg-black/[.075] hover:text-black/80"
+                      }`}
+                    >
+                      <span>{filter}</span>
+                      <span className="text-xs tabular-nums opacity-65">{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <div className="mb-6 flex flex-wrap gap-2">
             <input
               value={name}
@@ -1520,10 +1578,20 @@ function GroceryList({
               aria-label="장보기 분류"
             >
               <option>채소</option>
-              <option>정육</option>
+              <option>과일</option>
+              <option>육류</option>
+              <option>수산물</option>
+              <option>해조류</option>
+              <option>달걀</option>
               <option>유제품</option>
-              <option>냉장</option>
+              <option>곡류</option>
+              <option>면류</option>
+              <option>콩류</option>
+              <option>김치</option>
+              <option>가공식품</option>
+              <option>냉장·냉동</option>
               <option>양념</option>
+              <option>음료</option>
               <option>기타</option>
             </select>
             <Button
@@ -1543,14 +1611,28 @@ function GroceryList({
               {message}
             </p>
           )}
-          {Object.entries(groups).map(([group, items]) => (
-            <section key={group} className="mb-6 last:mb-0">
-              <p className="mb-2 text-xs font-semibold tracking-[.08em] text-black/55">
-                {group}
-              </p>
-              {items.map((item) => (
+          {visibleGrocery.length > 0 && (
+            <p className="mb-6 text-sm leading-6 text-black/55">
+              같은 재료가 여러 날 필요하면 처음 사용하는 날짜에 한 번만 표시합니다.
+            </p>
+          )}
+          {groupedEntries.map(([group, items]) => (
+            <section key={group} className="mb-8 last:mb-0">
+              <div className="flex items-center justify-between gap-3 border-b border-black/10 pb-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <CalendarDays aria-hidden="true" size={15} className="shrink-0 text-black/45" />
+                  <h3 className="truncate text-sm font-semibold text-black/80">
+                    {groceryGroupLabel(group)}
+                  </h3>
+                </div>
+                <span className="shrink-0 text-xs tabular-nums text-black/45">
+                  {items.filter((item) => !item.done).length}개 남음
+                </span>
+              </div>
+              <div className="divide-y divide-black/[.07]">
+                {items.map((item) => (
                 <div
-                  className="flex items-center gap-2 border-t border-black/[.07] py-2"
+                  className="flex items-center gap-2 py-2"
                   key={item.id}
                 >
                   <button
@@ -1566,11 +1648,24 @@ function GroceryList({
                       {item.done && <Check size={13} />}
                     </span>
                   </button>
-                  <span
-                    className={`min-w-0 flex-1 text-sm ${item.done ? "text-black/50 line-through" : ""}`}
-                  >
-                    {item.name}
-                  </span>
+                  <div className="min-w-0 flex-1 py-1">
+                    <p
+                      className={`text-sm ${item.done ? "text-black/50 line-through" : ""}`}
+                    >
+                      {item.name}
+                    </p>
+                    <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-5 text-black/45">
+                      <span>{groceryCategory(item.category)}</span>
+                      {item.usePlan && item.usePlan !== "직접 추가" && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span title={formatGroceryUsePlan(item.usePlan)}>
+                            {summarizeGroceryUsePlan(item.usePlan)}
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  </div>
                   <button
                     type="button"
                     onClick={() => void remove(item)}
@@ -1580,12 +1675,18 @@ function GroceryList({
                     <Trash2 size={16} />
                   </button>
                 </div>
-              ))}
+                ))}
+              </div>
             </section>
           ))}
           {!grocery.length && (
             <p className="py-8 text-center text-sm text-black/55">
               이 주차에 저장된 장보기 항목이 없습니다.
+            </p>
+          )}
+          {grocery.length > 0 && !visibleGrocery.length && (
+            <p className="py-8 text-center text-sm text-black/55">
+              선택한 분류에 해당하는 품목이 없습니다.
             </p>
           )}
         </CardContent>
@@ -2376,7 +2477,7 @@ function AgentModal({
         ? "선택한 주차의 메뉴는 유지하고 레시피만 새로 만듭니다."
         : request.action === "REGENERATE_GROCERY"
           ? "준비된 주간 레시피를 합산해 장보기만 다시 계산합니다."
-          : "이번 주 식단과 검증된 블로그 레시피·장보기를 준비합니다.";
+          : "이번 주 식단과 검증된 만개의레시피·장보기를 준비합니다.";
   const createPlan = async () => {
     if (!prompt.trim()) return;
     setLoading(true);
@@ -2599,6 +2700,59 @@ function formatRecipeDates(dates: string[]) {
   const label = (date: string) =>
     `${date.slice(5).replace("-", "/")}(${weekdayFor(date)})`;
   return first === last ? label(first) : `${label(first)} – ${label(last)}`;
+}
+const GROCERY_CATEGORY_ORDER = [
+  "채소",
+  "과일",
+  "육류",
+  "수산물",
+  "해조류",
+  "달걀",
+  "유제품",
+  "곡류",
+  "면류",
+  "콩류",
+  "김치",
+  "가공식품",
+  "냉장·냉동",
+  "양념",
+  "음료",
+  "기타",
+];
+function groceryCategory(value: string) {
+  const category = String(value || "기타").trim();
+  if (/^(정육|육류|돼지고기|소고기|닭고기|오리고기)$/.test(category))
+    return "육류";
+  if (/^(수산물|생선|해산물|어패류|건어물)$/.test(category))
+    return "수산물";
+  if (/^(채소류|나물)$/.test(category)) return "채소";
+  if (/^(계란)$/.test(category)) return "달걀";
+  if (/^(두부|두류)$/.test(category)) return "콩류";
+  if (/^(냉장|냉동)$/.test(category)) return "냉장·냉동";
+  if (/^(조미료|소스|조리유|국물)$/.test(category)) return "양념";
+  return category || "기타";
+}
+function groceryCategoryOrder(category: string) {
+  const index = GROCERY_CATEGORY_ORDER.indexOf(category);
+  return index === -1 ? GROCERY_CATEGORY_ORDER.length : index;
+}
+function groceryGroupOrder(group: string) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(group)) return `0-${group}`;
+  return group === "manual" ? "1-manual" : "2-unscheduled";
+}
+function groceryGroupLabel(group: string) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(group))
+    return `${Number(group.slice(5, 7))}월 ${Number(group.slice(8))}일 ${weekdayFor(group)}요일`;
+  return group === "manual" ? "직접 추가한 항목" : "사용일 미정";
+}
+function formatGroceryUsePlan(usePlan: string) {
+  return usePlan.replace(/(^|\s·\s)(\d{2})-(\d{2})(?=\s)/g, "$1$2/$3");
+}
+function summarizeGroceryUsePlan(usePlan: string) {
+  const uses = formatGroceryUsePlan(usePlan).split(" · ");
+  return uses.length <= 2
+    ? uses.join(" · ")
+    : `${uses.slice(0, 2).join(" · ")} 외 ${uses.length - 2}회`;
 }
 function weekdayFor(date: string) {
   return ["일", "월", "화", "수", "목", "금", "토"][

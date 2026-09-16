@@ -70,8 +70,6 @@ assert.ok(chooseCatalogMenu({ catalog: similarCatalog.slice(0, 1), history: rece
   sourceCategories: ["메인반찬"], date: "2026-09-15", seed: "only-candidate" }),
 "후보가 한 개뿐이어도 최근 사용 메뉴를 약하게 재허용해 생성이 멈추지 않는다.");
 
-console.log("catalog selection checks passed");
-
 const sideCatalog = flattenCatalog([
   { sourceCategory: "밑반찬", baseName: "감자조림", variantName: "간장감자조림" },
   { sourceCategory: "밑반찬", baseName: "어묵볶음", variantName: "간장어묵볶음" },
@@ -94,3 +92,19 @@ const coverageCatalog = flattenCatalog([
   {sourceCategory:"메인반찬",baseName:"A",variantName:"A1"},{sourceCategory:"메인반찬",baseName:"B",variantName:"B1"},{sourceCategory:"메인반찬",baseName:"C",variantName:"C1"},{sourceCategory:"메인반찬",baseName:"D",variantName:"D1"},
 ]);
 assert.ok(chooseCatalogMenu({catalog:coverageCatalog,sourceCategories:["메인반찬"],date:"2026-09-10",seed:"coverage",history:[{date:"2026-09-01",...coverageCatalog[0]},{date:"2026-09-01",...coverageCatalog[1]}]}), "세부메뉴 제외 비율이 25%를 넘으면 생성이 멈추지 않고 낮은 가중치로 완화한다.");
+
+const roleCatalog = flattenCatalog([
+  {sourceCategory:"메인반찬",baseName:"두부조림",variantName:"간장두부조림"},
+  {sourceCategory:"메인반찬",baseName:"닭갈비",variantName:"춘천닭갈비"},
+  {sourceCategory:"밑반찬",baseName:"두부조림",variantName:"간장두부조림"},
+]);
+const crossRolePick = chooseCatalogMenu({
+  catalog: roleCatalog,
+  sourceCategories: ["메인반찬"],
+  date: "2026-09-10",
+  seed: "a",
+  history: [{date:"2026-09-09", ...roleCatalog[2]}],
+});
+assert.equal(crossRolePick.variantName, "간장두부조림", "부찬에서 먹은 같은 이름은 주찬 세부메뉴 쿨다운에 섞지 않는다.");
+
+console.log("catalog selection checks passed");

@@ -31,7 +31,8 @@ export async function POST(request: Request) {
     }
     if (scope === "week") {
       const basis = new Date(`${date}T00:00:00Z`); basis.setUTCDate(basis.getUTCDate() - basis.getUTCDay());
-      const changes = Array.from({length:7}, (_, index) => { const value=new Date(basis); value.setUTCDate(value.getUTCDate()+index); const target=value.toISOString().slice(0,10); return JSON.parse(run(["generate-catalog-day","--date",target])).mealChanges[0]; });
+      const seedSalt = String(Date.now());
+      const changes = Array.from({length:7}, (_, index) => { const value=new Date(basis); value.setUTCDate(value.getUTCDate()+index); const target=value.toISOString().slice(0,10); return JSON.parse(run(["generate-catalog-day","--date",target,"--salt",seedSalt])).mealChanges[0]; });
       const file=write({schemaVersion:"meal-week.v1",changeReason:"카탈로그 선택기로 주간 식단을 다시 구성했습니다.",mealChanges:changes,recipes:[]});
       try { run(["publish-days","--input",file]); } finally { fs.rmSync(file,{force:true}); }
       return NextResponse.json({ok:true,message:"이번 주 식단을 카탈로그 선택기로 다시 구성했습니다."});

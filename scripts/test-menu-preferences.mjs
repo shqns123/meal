@@ -56,5 +56,16 @@ assert.equal(missingRecipeCoverage([plan],[{...recipe,sourceCheckedAt:null}]).le
 assert.equal(missingRecipeCoverage([plan],[{...recipe,ingredients:[{amount:"적당량"}]}]).length,1);
 assert.equal(missingRecipeCoverage([plan],[{...recipe,needsReview:true}]).length,1);
 assert.deepEqual(missingRecipeCoverage([{...plan,dinnerDiningOut:true}],[]),[]);
+const weekendTime = Date.parse("2026-09-19T00:00:00+09:00");
+for (const lunchPlan of ["회사 식사", "외식", "미식사", "없음"])
+  assert.deepEqual(
+    missingRecipeCoverage([{...plan,date:weekendTime,lunchPlan,dinnerDiningOut:true}],[]),
+    [],
+    `${lunchPlan}에는 점심 레시피가 필요하지 않다`,
+  );
+assert.deepEqual(
+  missingRecipeCoverage([{...plan,date:weekendTime,lunchPlan:"김치볶음밥",dinnerDiningOut:true}],[]),
+  ["2026-09-19 · 김치볶음밥 (점심)"],
+);
 db.close();
 console.log("메뉴 취향 검증 통과: 미확인·익숙함 분리, 부분 수정, 가족/참석 범위, 주간 기피 만료, 메뉴명 구분, 기존 식단 유지, 레시피 누락.");
