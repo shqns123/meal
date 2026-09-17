@@ -181,7 +181,6 @@ fs.mkdirSync(path.dirname(catalogPath), { recursive: true });
 const db = new DatabaseSync(catalogPath);
 // Related menu tags are refreshed as a set on every import. Recreate derived
 // tables so older catalog files also receive the current shape.
-db.exec('DROP TABLE IF EXISTS "RecipeCatalogRecipe"');
 db.exec('DROP TABLE IF EXISTS "RecipeCatalogVariant"');
 db.exec('DROP TABLE IF EXISTS "RecipeCatalogMenu"');
 db.exec(`

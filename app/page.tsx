@@ -20,6 +20,7 @@ import {
   Search,
   Send,
   Settings,
+  SlidersHorizontal,
   ShoppingBasket,
   Sparkles,
   Trash2,
@@ -33,6 +34,7 @@ import {
   MenuPreferences,
   MenuFeedback,
 } from "@/components/menu-preferences";
+import { CatalogWeightSettings } from "@/components/catalog-weight-settings";
 import { PANTRY_UNITS, PANTRY_STORAGE } from "@/lib/pantry-options";
 
 type Meal = {
@@ -144,6 +146,7 @@ const nav = [
   [BookOpen, "레시피"],
   [ShoppingBasket, "장보기"],
   [UtensilsCrossed, "우리 집 메뉴"],
+  [SlidersHorizontal, "선택기 설정"],
 ] as const;
 const seedMeals: Meal[] = [];
 const seedRecipes: Recipe[] = [];
@@ -505,6 +508,7 @@ export default function Home() {
             />
           )}
           {active === "우리 집 메뉴" && <MenuPreferences />}
+          {active === "선택기 설정" && <CatalogWeightSettings />}
           {active === "주간 점검" && (
             <WeeklyReviewSettings
               onRequest={(request) =>

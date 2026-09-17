@@ -994,6 +994,15 @@ function catalogHistory(items, meals) {
   }
   return history;
 }
+function catalogMenuWeights() {
+  try {
+    return new Map(db.prepare('SELECT "sourceCategory","baseName","weightPercent" FROM "CatalogMenuWeight"').all()
+      .map((item) => [`${item.sourceCategory}|${item.baseName}`, Number(item.weightPercent) / 100]));
+  } catch {
+    // 이전 DB를 읽는 진단·테스트 경로에서는 현재 기본값 100%를 유지한다.
+    return new Map();
+  }
+}
 function matchesSelectionRole(item, role) {
   const name = normalizeName(item.variantName);
   const soupLike = /찌개|전골|국$|탕$/.test(name);
@@ -1020,6 +1029,7 @@ function weeklyAvoidForDate(date) {
     ? String(review.avoidFoods || "") : "";
 }
 function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage, pickSides }) {
+  const menuWeights = catalogMenuWeights();
   const pick = (sourceCategories, role, excludeCookingFamily = null) => {
     const selectionRole = role.startsWith("side") ? "SIDE"
       : role === "soup" ? "SOUP"
@@ -1031,7 +1041,11 @@ function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage,
         && usage.get(`${catalogRole(item.sourceCategory)}|${normalizeName(item.variantName)}`) !== "AVOID"
         && (!excludeCookingFamily || item.cookingFamily !== excludeCookingFamily)
         && !weeklyAvoid.some((avoid) => item.variantName.includes(avoid) || item.baseName.includes(avoid)))
-        .map((item) => ({ ...item, selectionBoost: pantrySelectionBoost(item, date) })),
+        .map((item) => ({
+          ...item,
+          selectionBoost: pantrySelectionBoost(item, date),
+          selectionWeight: menuWeights.get(`${item.sourceCategory}|${item.baseName}`) ?? 1,
+        })),
       history, sourceCategories, date, seed: `${seed}:${role}`,
     });
     if (!selected) return null;
@@ -1177,11 +1191,16 @@ function catalogLunchForDate(date, current, catalog, history, usage, seedSalt) {
     return "외식";
   }
   const weeklyAvoid = weeklyAvoidForDate(date).split(/[,/·\n]/).map((item) => item.trim()).filter(Boolean);
+  const menuWeights = catalogMenuWeights();
   const selected = chooseCatalogMenu({
     catalog: catalog.filter((item) => isCatalogItemAllowed(item)
       && usage.get(`한그릇|${normalizeName(item.variantName)}`) !== "AVOID"
       && !weeklyAvoid.some((avoid) => item.variantName.includes(avoid) || item.baseName.includes(avoid)))
-      .map((item) => ({ ...item, selectionBoost: pantrySelectionBoost(item, date) })),
+      .map((item) => ({
+        ...item,
+        selectionBoost: pantrySelectionBoost(item, date),
+        selectionWeight: menuWeights.get(`${item.sourceCategory}|${item.baseName}`) ?? 1,
+      })),
     history,
     sourceCategories: ["밥/죽/떡", "면/만두"],
     date,

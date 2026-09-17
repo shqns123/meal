@@ -107,4 +107,17 @@ const crossRolePick = chooseCatalogMenu({
 });
 assert.equal(crossRolePick.variantName, "간장두부조림", "부찬에서 먹은 같은 이름은 주찬 세부메뉴 쿨다운에 섞지 않는다.");
 
+const weightedCatalog = flattenCatalog([
+  {sourceCategory:"메인반찬",baseName:"선호메뉴",variantName:"선호메뉴"},
+  {sourceCategory:"메인반찬",baseName:"제외메뉴",variantName:"제외메뉴"},
+]).map((item) => ({ ...item, selectionWeight: item.baseName === "제외메뉴" ? 0 : 1 }));
+for (let index = 0; index < 20; index += 1) {
+  assert.equal(chooseCatalogMenu({
+    catalog: weightedCatalog,
+    sourceCategories: ["메인반찬"],
+    date: "2026-09-10",
+    seed: `configured-weight-${index}`,
+  }).baseName, "선호메뉴", "가중치 0%인 기본메뉴는 자동 선택에서 제외한다.");
+}
+
 console.log("catalog selection checks passed");

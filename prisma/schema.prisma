@@ -8,134 +8,144 @@ datasource db {
 }
 
 model FamilyMember {
-  id              String           @id @default(cuid())
-  name            String
-  role            String
-  birthDate       DateTime?
-  color           String           @default("#e6f3fe")
-  dietaryNotes    String?
-  allergies       String           @default("")
-  chewingAbility  String?
-  spiceTolerance  String?
-  createdAt       DateTime         @default(now())
-  mealPlans       MealPlan[]
-  schedules       FamilySchedule[]
+  id             String           @id @default(cuid())
+  name           String
+  role           String
+  birthDate      DateTime?
+  color          String           @default("#e6f3fe")
+  dietaryNotes   String?
+  allergies      String           @default("")
+  chewingAbility String?
+  spiceTolerance String?
+  createdAt      DateTime         @default(now())
+  mealPlans      MealPlan[]
+  schedules      FamilySchedule[]
 }
 
 model Dish {
-  id          String           @id @default(cuid())
-  name        String
-  category    String
-  aliases     String           @default("[]")
-  preferences DishPreference[]
-  createdAt   DateTime         @default(now())
+  id            String           @id @default(cuid())
+  name          String
+  category      String
+  aliases       String           @default("[]")
+  preferences   DishPreference[]
+  createdAt     DateTime         @default(now())
   lastPlannedAt DateTime?
 
   @@unique([name, category])
 }
 
 model DishPreference {
-  id           String   @id @default(cuid())
-  dishId       String
-  dish         Dish     @relation(fields: [dishId], references: [id], onDelete: Cascade)
-  scope        String   @default("family")
-  usage        String   @default("UNKNOWN")
-  familiarity  String   @default("UNKNOWN")
-  note         String   @default("")
-  source       String
-  confirmedAt  DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id          String   @id @default(cuid())
+  dishId      String
+  dish        Dish     @relation(fields: [dishId], references: [id], onDelete: Cascade)
+  scope       String   @default("family")
+  usage       String   @default("UNKNOWN")
+  familiarity String   @default("UNKNOWN")
+  note        String   @default("")
+  source      String
+  confirmedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   @@unique([dishId, scope])
 }
 
+model CatalogMenuWeight {
+  id             String   @id @default(cuid())
+  sourceCategory String
+  baseName       String
+  weightPercent  Int      @default(100)
+  updatedAt      DateTime @updatedAt
+
+  @@unique([sourceCategory, baseName])
+}
+
 model Recipe {
-  id             String       @id @default(cuid())
-  title          String
-  description    String?
-  prepMinutes    Int          @default(15)
-  cookMinutes    Int          @default(20)
-  adultServings  Int          @default(2)
-  childServings  Int          @default(1)
-  tags           String       @default("")
-  category       String       @default("주찬")
-  plannedDates  String       @default("")
-  weekKeys       String       @default("")
-  instructions   String       @default("")
-  babySplitStep  String?
-  storageMethod  String?
-  consumeWithin  String?
-  sourceUrl      String?
-  sourceTitle    String?
-  sourceAuthor   String?
-  sourceDomain   String?
+  id              String       @id @default(cuid())
+  title           String
+  description     String?
+  prepMinutes     Int          @default(15)
+  cookMinutes     Int          @default(20)
+  adultServings   Int          @default(2)
+  childServings   Int          @default(1)
+  tags            String       @default("")
+  category        String       @default("주찬")
+  plannedDates    String       @default("")
+  weekKeys        String       @default("")
+  instructions    String       @default("")
+  babySplitStep   String?
+  storageMethod   String?
+  consumeWithin   String?
+  sourceUrl       String?
+  sourceTitle     String?
+  sourceAuthor    String?
+  sourceDomain    String?
   sourceCheckedAt DateTime?
-  needsReview    Boolean      @default(false)
-  ingredients    Ingredient[]
-  mealPlans      MealPlan[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  needsReview     Boolean      @default(false)
+  ingredients     Ingredient[]
+  mealPlans       MealPlan[]
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 }
 
 model Ingredient {
-  id String @id @default(cuid())
-  name String
-  amount String
+  id       String @id @default(cuid())
+  name     String
+  amount   String
   category String
   recipeId String
-  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  recipe   Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
 }
 
 model MealPlan {
-  id               String        @id @default(cuid())
-  date             DateTime
-  monthKey         String
-  mealType         MealType
-  lunchPlan        String?
-  mainDish         String?
-  soupDish         String?
-  mealStyle        String        @default("MAIN_DISH")
-  sideDishes       String        @default("")
-  babyMenu         String?
-  cookingNote      String?
-  changeReason     String?
-  adultServings    Int           @default(2)
-  childServings    Int           @default(1)
-  dinnerDiningOut  Boolean       @default(false)
-  recipeId         String?
-  recipe           Recipe?       @relation(fields: [recipeId], references: [id])
-  memberId         String?
-  member           FamilyMember? @relation(fields: [memberId], references: [id])
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  id              String        @id @default(cuid())
+  date            DateTime
+  monthKey        String
+  mealType        MealType
+  lunchPlan       String?
+  mainDish        String?
+  soupDish        String?
+  mealStyle       String        @default("MAIN_DISH")
+  sideDishes      String        @default("")
+  babyMenu        String?
+  cookingNote     String?
+  changeReason    String?
+  adultServings   Int           @default(2)
+  childServings   Int           @default(1)
+  dinnerDiningOut Boolean       @default(false)
+  recipeId        String?
+  recipe          Recipe?       @relation(fields: [recipeId], references: [id])
+  memberId        String?
+  member          FamilyMember? @relation(fields: [memberId], references: [id])
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
   @@index([monthKey, date])
   @@index([date, mealType])
 }
 
 model FamilySchedule {
-  id             String       @id @default(cuid())
-  date           DateTime
-  memberId       String
-  member         FamilyMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
-  isWorking      Boolean      @default(false)
-  eatsAtCompany  Boolean      @default(false)
-  isAway         Boolean      @default(false)
-  lunchNotAtHome Boolean      @default(false)
-  dinnerNotAtHome Boolean     @default(false)
-  note           String?
+  id              String       @id @default(cuid())
+  date            DateTime
+  memberId        String
+  member          FamilyMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  isWorking       Boolean      @default(false)
+  eatsAtCompany   Boolean      @default(false)
+  isAway          Boolean      @default(false)
+  lunchNotAtHome  Boolean      @default(false)
+  dinnerNotAtHome Boolean      @default(false)
+  note            String?
 
   @@unique([date, memberId])
 }
 
 model PantryItem {
-  id         String   @id @default(cuid())
-  name       String   @unique
-  quantity   Float
-  unit       String
-  category   String
-  expiresAt  DateTime?
-  updatedAt  DateTime @updatedAt
+  id        String    @id @default(cuid())
+  name      String    @unique
+  quantity  Float
+  unit      String
+  category  String
+  expiresAt DateTime?
+  updatedAt DateTime  @updatedAt
 }
 
 model ShoppingWeek {
@@ -163,13 +173,13 @@ model ShoppingItem {
 
 model BudgetPeriod {
   id            String    @id @default(cuid())
-  startDate     DateTime   @unique
+  startDate     DateTime  @unique
   endDate       DateTime
-  monthlyLimit  Int        @default(700000)
-  weeklyMinimum Int        @default(100000)
-  weeklyMaximum Int        @default(120000)
+  monthlyLimit  Int       @default(700000)
+  weeklyMinimum Int       @default(100000)
+  weeklyMaximum Int       @default(120000)
   expenses      Expense[]
-  createdAt     DateTime   @default(now())
+  createdAt     DateTime  @default(now())
 }
 
 model Expense {
@@ -200,13 +210,13 @@ model AgentJob {
 }
 
 model AgentChat {
-  id          String   @id
+  id          String    @id
   question    String
-  status      String   @default("RUNNING")
+  status      String    @default("RUNNING")
   answer      String?
   sources     String?
   error       String?
-  createdAt   DateTime @default(now())
+  createdAt   DateTime  @default(now())
   completedAt DateTime?
   notifiedAt  DateTime?
 
@@ -223,16 +233,16 @@ model PushSubscription {
 }
 
 model WeeklyReview {
-  id              String   @id @default(cuid())
-  weekStart       DateTime @unique
+  id              String    @id @default(cuid())
+  weekStart       DateTime  @unique
   referenceDate   DateTime?
   budgetRemaining Int?
   diningOutPlan   String?
   wantedFoods     String?
   avoidFoods      String?
   note            String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 }
 
 enum MealType {

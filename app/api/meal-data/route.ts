@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { prisma } from "@/lib/prisma";
 import { missingRecipeCoverage } from "@/lib/recipe-coverage.mjs";
+
+export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
@@ -26,6 +31,7 @@ export async function GET(request: Request) {
       include: { items: { orderBy: [{ usePlan: "asc" }, { name: "asc" }] } },
     }),
   ]);
+  const catalogRecipes = catalogRecipeCards(mealPlans, recipes, weekStart, weekEnd);
 
   return NextResponse.json({
     groceryMissingRecipes: missingRecipeCoverage(mealPlans.filter(meal => meal.date >= weekStart && meal.date < weekEnd), recipes),
@@ -55,7 +61,7 @@ export async function GET(request: Request) {
       note: meal.cookingNote,
       changeReason: meal.changeReason,
     })),
-    recipes: recipes.map((recipe, index) => {
+    recipes: [...recipes.map((recipe, index) => {
       const isSideDish =
         recipe.category === "반찬" || recipe.category === "부찬";
       return {
@@ -92,7 +98,7 @@ export async function GET(request: Request) {
         storageMethod: recipe.storageMethod,
         consumeWithin: recipe.consumeWithin,
       };
-    }),
+    }), ...catalogRecipes],
     grocery: (shoppingWeek?.items ?? []).map((item) => ({
       id: item.id,
       name: `${item.name} ${item.quantity}${item.unit}`,
@@ -102,6 +108,120 @@ export async function GET(request: Request) {
       useDates: shoppingUseDates(item.usePlan, week),
     })),
   });
+}
+
+type CatalogMeal = {
+  date: Date;
+  mainDish: string | null;
+  soupDish: string | null;
+  sideDishes: string;
+  lunchPlan: string | null;
+  dinnerDiningOut: boolean;
+};
+
+type CatalogRecipeRow = {
+  id: string;
+  variantName: string;
+  sourceUrl: string;
+  sourceTitle: string;
+  sourceAuthor: string | null;
+  servingsText: string | null;
+  durationText: string | null;
+  ingredientGroups: string;
+  instructions: string;
+};
+
+function catalogRecipeCards(
+  meals: CatalogMeal[],
+  storedRecipes: { title: string }[],
+  weekStart: Date,
+  weekEnd: Date,
+) {
+  const required = new Map<string, { category: "주찬" | "부찬"; dates: Set<string> }>();
+  const add = (title: string | null, category: "주찬" | "부찬", date: string) => {
+    const name = String(title ?? "").trim();
+    if (!name) return;
+    const current = required.get(name) ?? { category, dates: new Set<string>() };
+    if (category === "주찬") current.category = category;
+    current.dates.add(date);
+    required.set(name, current);
+  };
+  for (const meal of meals) {
+    if (meal.date < weekStart || meal.date >= weekEnd) continue;
+    const date = formatKst(meal.date);
+    if (!meal.dinnerDiningOut) {
+      add(meal.mainDish, "주찬", date);
+      add(meal.soupDish, "주찬", date);
+      for (const side of parseList(meal.sideDishes)) add(side, "부찬", date);
+    }
+    const day = new Date(`${date}T00:00:00Z`).getUTCDay();
+    if ([0, 6].includes(day) && meal.lunchPlan && meal.lunchPlan !== "회사 식사")
+      add(meal.lunchPlan, "주찬", date);
+  }
+  for (const recipe of storedRecipes) required.delete(recipe.title);
+  const names = [...required.keys()];
+  if (!names.length) return [];
+
+  const catalogPath = process.env.MEAL_CATALOG_DB_PATH
+    ?? join(process.env.MEAL_PLAN_ROOT || process.cwd(), "data", "10000recipe-catalog.db");
+  if (!existsSync(catalogPath)) return [];
+  let catalog: DatabaseSync;
+  try { catalog = new DatabaseSync(catalogPath, { readOnly: true }); }
+  catch (error) {
+    console.error(`레시피 카탈로그를 열지 못했습니다: ${catalogPath}`, error);
+    return [];
+  }
+  try {
+    const table = catalog.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='RecipeCatalogRecipe'`).get();
+    if (!table) return [];
+    const placeholders = names.map(() => "?").join(",");
+    const rows = catalog.prepare(`SELECT "id","variantName","sourceUrl","sourceTitle","sourceAuthor","servingsText","durationText","ingredientGroups","instructions" FROM "RecipeCatalogRecipe" WHERE "variantName" IN (${placeholders}) ORDER BY "variantName"`).all(...names) as CatalogRecipeRow[];
+    return rows.map((row, index) => {
+      const use = required.get(row.variantName)!;
+      const groups = safeJson<{ group: string; items: string[] }[]>(row.ingredientGroups, []);
+      const ingredients = groups.flatMap((group) => group.items.map((item) => ({
+        ...catalogIngredient(item),
+        category: group.group,
+      })));
+      return {
+        id: `catalog-${row.id}`,
+        color: ["bg-[#ffe0db]", "bg-[#e2f3e9]", "bg-[#fff0d4]"][(storedRecipes.length + index) % 3],
+        title: row.variantName,
+        meta: [row.servingsText, row.durationText].filter(Boolean).join(" · ") || "원문 분량",
+        category: use.category === "부찬" ? "부찬" : "주찬",
+        plannedDates: [...use.dates].sort(),
+        tags: [use.category === "부찬" ? "부찬" : "주찬", "카탈로그 저장본", "만개의레시피 원문"],
+        sourceUrl: row.sourceUrl,
+        sourceTitle: row.sourceTitle,
+        sourceAuthor: row.sourceAuthor,
+        description: "미리 수집해 둔 만개의레시피 원문 기준 레시피입니다.",
+        prepMinutes: 0,
+        cookMinutes: Number.parseInt(row.durationText ?? "", 10) || 0,
+        instructions: safeJson<string[]>(row.instructions, []),
+        ingredients,
+        babySplitStep: null,
+        storageMethod: null,
+        consumeWithin: null,
+      };
+    });
+  } catch (error) {
+    console.error(`레시피 카탈로그를 읽지 못했습니다: ${catalogPath}`, error);
+    return [];
+  } finally {
+    catalog.close();
+  }
+}
+
+function safeJson<T>(value: string, fallback: T): T {
+  try { return JSON.parse(value) as T; }
+  catch { return fallback; }
+}
+
+function catalogIngredient(value: string) {
+  const text = String(value).trim();
+  const match = text.match(/^(.*?)(\s+(?:\d[\d./~-]*\s*)?[^\s]*)$/u);
+  if (!match) return { name: text, amount: "" };
+  return { name: match[1].trim() || text, amount: match[2].trim() };
 }
 
 function shoppingUseDates(usePlan: string, weekStart: string) {
