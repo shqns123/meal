@@ -767,11 +767,12 @@ function runChatGroceryAction(decision) {
     if (matches.length !== 1)
       return {
         answer: matches.length
-          ? `품목이 여러 개 검색됐습니다: ${matches.map((item) => item.name).join(", ")}. 정확한 이름을 알려주세요.`
+          ? `품목이 여러 개 검색됐습니다: ${matches.map((item) => `${item.name} ${item.quantity}${item.unit}`).join(", ")}. 정확한 이름과 단위를 알려주세요.`
           : `${weekStart} 주차 장보기에서 '${name}'을 찾지 못했습니다.`,
         sources: [],
       };
     name = matches[0].name;
+    decision.unit = matches[0].unit;
   }
   const operation =
     decision.intent === "ADD_GROCERY"
@@ -1111,7 +1112,7 @@ async function runPlanner() {
   const current = context(task.weekStart);
   if (task.action === "REVIEW_WEEK") {
     const result = await ask(
-      systemPrompt(ruleFiles) + "\n\n주간 점검이다. referenceDate부터 토요일까지만 판단한다. 유지하면 {\"decision\":\"maintain\",\"summary\":\"...\"}; 수정하면 {\"decision\":\"change\",\"changeReason\":\"...\",\"mealChanges\":[...]}를 반환한다. 레시피는 후속 작업에서 별도로 생성한다.",
+      systemPrompt(ruleFiles) + "\n\n주간 점검이다. referenceDate부터 토요일까지만 판단한다. selectionPreview의 urgentPantryMatches는 저장된 세부메뉴 레시피 재료와 보유 재료를 대조한 결과다. 소비기한이 3일 이내인 재료가 있고 현재 식단보다 해당 재료를 자연스럽게 소진할 후보가 있으면 그 날짜의 메뉴를 변경한다. 이미 현재 메뉴로 충분히 소진하거나 기피·알레르기·반복 제한과 충돌하면 유지할 수 있다. 유지하면 {\"decision\":\"maintain\",\"summary\":\"...\"}; 수정하면 {\"decision\":\"change\",\"changeReason\":\"...\",\"mealChanges\":[...]}를 반환한다. 레시피는 후속 작업에서 별도로 생성한다.",
       "[주간 컨텍스트]\n" + JSON.stringify(current) + "\n[사용자 점검 정보]\n" + task.prompt,
       false,
     );

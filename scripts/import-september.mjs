@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS "ShoppingItem" (
   "usePlan" TEXT NOT NULL, "purchased" BOOLEAN NOT NULL DEFAULT 0, "weekId" TEXT NOT NULL,
   CONSTRAINT "ShoppingItem_weekId_fkey" FOREIGN KEY ("weekId") REFERENCES "ShoppingWeek" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "ShoppingItem_weekId_name_key" ON "ShoppingItem"("weekId", "name");
+CREATE UNIQUE INDEX IF NOT EXISTS "ShoppingItem_weekId_name_unit_key" ON "ShoppingItem"("weekId", "name", "unit");
 CREATE TABLE IF NOT EXISTS "BudgetPeriod" (
   "id" TEXT PRIMARY KEY NOT NULL, "startDate" DATETIME NOT NULL, "endDate" DATETIME NOT NULL,
   "monthlyLimit" INTEGER NOT NULL DEFAULT 700000, "weeklyMinimum" INTEGER NOT NULL DEFAULT 100000,

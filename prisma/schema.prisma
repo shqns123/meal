@@ -168,7 +168,7 @@ model ShoppingItem {
   weekId        String
   week          ShoppingWeek @relation(fields: [weekId], references: [id], onDelete: Cascade)
 
-  @@unique([weekId, name])
+  @@unique([weekId, name, unit])
 }
 
 model BudgetPeriod {

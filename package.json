@@ -17,6 +17,7 @@
     "sync:10000recipe-recipes": "node scripts/sync-10000recipe-recipes.mjs",
     "test:10000recipe-recipes": "node scripts/test-10000recipe-catalog-recipes.mjs",
     "test:catalog-selection": "node scripts/test-catalog-selection.mjs",
+    "test:pantry-selection": "node scripts/test-pantry-selection.mjs",
     "test:meal-diversity": "node scripts/test-meal-diversity.mjs",
     "test:final-meal-quality": "node scripts/test-final-meal-quality.mjs",
     "test:recipe-source": "node scripts/test-recipe-source.mjs",

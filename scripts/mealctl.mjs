@@ -16,6 +16,10 @@ import {
   isVerifiedRecipeSource,
   recipeSourceError,
 } from "../lib/recipe-source.mjs";
+import {
+  buildRecipeIngredientIndex,
+  pantrySelectionSignal as calculatePantrySelectionSignal,
+} from "../lib/pantry-selection.mjs";
 
 const root = process.env.MEAL_PLAN_ROOT ?? process.cwd();
 const dbPath =
@@ -509,21 +513,43 @@ const banned = [
 const pantrySelectionItems = db.prepare(
   'SELECT "name","quantity","expiresAt" FROM "PantryItem" WHERE "quantity">0 ORDER BY "expiresAt"',
 ).all();
-function pantrySelectionBoost(item, date) {
-  const text = `${item.baseName} ${item.variantName}`;
-  const target = toMillis(date);
-  let boost = 1;
-  for (const pantry of pantrySelectionItems) {
-    const name = normalizeName(pantry.name);
-    if (!name || !text.includes(name)) continue;
-    boost += 0.35;
-    if (pantry.expiresAt) {
-      const days = (Number(pantry.expiresAt) - target) / 86_400_000;
-      if (days <= 3) boost += 0.75;
-      else if (days <= 7) boost += 0.4;
+let recipeIngredientIndex;
+function selectionRecipeIngredientIndex() {
+  if (recipeIngredientIndex) return recipeIngredientIndex;
+  let catalogRows = [];
+  if (fs.existsSync(catalogPath)) {
+    const catalog = new DatabaseSync(catalogPath, { readOnly: true });
+    try {
+      catalogRows = catalog.prepare(
+        'SELECT "variantName","ingredientGroups" FROM "RecipeCatalogRecipe"',
+      ).all();
+    } catch {
+      // 레시피 동기화 전 카탈로그 DB도 메뉴명 기반 보정을 계속 사용할 수 있다.
+      catalogRows = [];
+    } finally {
+      catalog.close();
     }
   }
-  return Math.min(boost, 3);
+  const storedRows = db.prepare(
+    `SELECT r."title" AS "variantName",i."name" AS "ingredientName"
+     FROM "Recipe" r JOIN "Ingredient" i ON i."recipeId"=r."id"`,
+  ).all();
+  recipeIngredientIndex = buildRecipeIngredientIndex({ catalogRows, storedRows });
+  return recipeIngredientIndex;
+}
+function pantrySelectionSignal(item, date) {
+  return calculatePantrySelectionSignal({
+    item,
+    date,
+    pantryItems: pantrySelectionItems,
+    recipeIngredientIndex: selectionRecipeIngredientIndex(),
+  });
+}
+function activeUrgentPantryMatches(signal, date, history) {
+  return signal.urgentMatches.filter((name) => {
+    const uses = history.filter((entry) => entry.urgentPantryMatches?.includes(name));
+    return uses.length < 3 && !uses.some((entry) => entry.date === date);
+  });
 }
 const mealStyles = new Set(["MAIN_DISH", "SOUP_MEAL", "NOODLE_DUMPLING", "RICE_PORRIDGE_TTEOK"]);
 function mealStyleFor(change, current = "MAIN_DISH") {
@@ -1041,15 +1067,22 @@ function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage,
         && usage.get(`${catalogRole(item.sourceCategory)}|${normalizeName(item.variantName)}`) !== "AVOID"
         && (!excludeCookingFamily || item.cookingFamily !== excludeCookingFamily)
         && !weeklyAvoid.some((avoid) => item.variantName.includes(avoid) || item.baseName.includes(avoid)))
-        .map((item) => ({
-          ...item,
-          selectionBoost: pantrySelectionBoost(item, date),
-          selectionWeight: menuWeights.get(`${item.sourceCategory}|${item.baseName}`) ?? 1,
-        })),
+        .map((item) => {
+          const pantrySignal = pantrySelectionSignal(item, date);
+          const activeUrgentMatches = activeUrgentPantryMatches(pantrySignal, date, history);
+          return {
+            ...item,
+            selectionBoost: pantrySignal.boost,
+            selectionPriority: activeUrgentMatches.length ? 1 : 0,
+            pantryMatches: pantrySignal.matches,
+            urgentPantryMatches: pantrySignal.urgentMatches,
+            selectionWeight: menuWeights.get(`${item.sourceCategory}|${item.baseName}`) ?? 1,
+          };
+        }),
       history, sourceCategories, date, seed: `${seed}:${role}`,
     });
     if (!selected) return null;
-    history.push({ date, variantName: selected.variantName, baseName: selected.baseName, sourceCategory: selected.sourceCategory, selectionRole: selected.selectionRole, cookingFamily: selected.cookingFamily, similarGroup: selected.similarGroup, flavorFamily: selected.flavorFamily, ingredientCategories: selected.ingredientCategories, primaryIngredient: selected.primaryIngredient });
+    history.push({ date, variantName: selected.variantName, baseName: selected.baseName, sourceCategory: selected.sourceCategory, selectionRole: selected.selectionRole, cookingFamily: selected.cookingFamily, similarGroup: selected.similarGroup, flavorFamily: selected.flavorFamily, ingredientCategories: selected.ingredientCategories, primaryIngredient: selected.primaryIngredient, urgentPantryMatches: selected.urgentPantryMatches });
     return { name: selected.variantName, baseMenu: selected.baseName, cookingFamily: selected.cookingFamily, cookingMethods: selected.cookingMethods, cookingMethodOrigin: selected.cookingMethodOrigin, ingredientCategories: selected.ingredientCategories, ingredientCategoryOrigin: selected.ingredientCategoryOrigin, similarGroup: selected.similarGroup, flavorFamily: selected.flavorFamily, primaryIngredient: selected.primaryIngredient, sourceCategory: selected.sourceCategory };
   };
   let main;
@@ -1196,11 +1229,18 @@ function catalogLunchForDate(date, current, catalog, history, usage, seedSalt) {
     catalog: catalog.filter((item) => isCatalogItemAllowed(item)
       && usage.get(`한그릇|${normalizeName(item.variantName)}`) !== "AVOID"
       && !weeklyAvoid.some((avoid) => item.variantName.includes(avoid) || item.baseName.includes(avoid)))
-      .map((item) => ({
-        ...item,
-        selectionBoost: pantrySelectionBoost(item, date),
-        selectionWeight: menuWeights.get(`${item.sourceCategory}|${item.baseName}`) ?? 1,
-      })),
+      .map((item) => {
+        const pantrySignal = pantrySelectionSignal(item, date);
+        const activeUrgentMatches = activeUrgentPantryMatches(pantrySignal, date, history);
+        return {
+          ...item,
+          selectionBoost: pantrySignal.boost,
+          selectionPriority: activeUrgentMatches.length ? 1 : 0,
+          pantryMatches: pantrySignal.matches,
+          urgentPantryMatches: pantrySignal.urgentMatches,
+          selectionWeight: menuWeights.get(`${item.sourceCategory}|${item.baseName}`) ?? 1,
+        };
+      }),
     history,
     sourceCategories: ["밥/죽/떡", "면/만두"],
     date,
@@ -1462,6 +1502,7 @@ function missingStoredCoverage(weekStart) {
 
 function writeShopping(weekStart, recipes, now) {
   const shopping = calculateShopping(recipes, weekStart);
+  const shoppingKey = (item) => `${item.name}|${item.unit}`;
   const weekEnd = addDays(weekStart, 6);
   db.prepare(
     'INSERT OR IGNORE INTO "ShoppingWeek" ("id","startDate","endDate","createdAt") VALUES (?,?,?,?)',
@@ -1476,9 +1517,9 @@ function writeShopping(weekStart, recipes, now) {
     .get(toMillis(weekStart));
   const purchased = new Map(
     db
-      .prepare('SELECT "name","purchased" FROM "ShoppingItem" WHERE "weekId"=?')
+      .prepare('SELECT "name","unit","purchased" FROM "ShoppingItem" WHERE "weekId"=?')
       .all(weekRow.id)
-      .map((item) => [item.name, item.purchased]),
+      .map((item) => [shoppingKey(item), item.purchased]),
   );
   const manualItems = db
     .prepare(
@@ -1498,12 +1539,12 @@ function writeShopping(weekStart, recipes, now) {
       item.category,
       item.ownedQuantity,
       item.usePlan,
-      purchased.get(item.name) ?? 0,
+      purchased.get(shoppingKey(item)) ?? 0,
       weekRow.id,
     );
-  const generatedNames = new Set(shopping.map((item) => item.name));
+  const generatedKeys = new Set(shopping.map(shoppingKey));
   for (const item of manualItems) {
-    if (generatedNames.has(item.name)) continue;
+    if (generatedKeys.has(shoppingKey(item))) continue;
     insertShopping.run(
       item.id,
       item.name,
@@ -2156,9 +2197,9 @@ function manageGroceryForChat(payload, weekStart) {
       db.prepare(
         `INSERT INTO "ShoppingItem" ("id","name","quantity","unit","category","ownedQuantity","usePlan","purchased","weekId")
          VALUES (?,?,?,?,?,?,?,?,?)
-         ON CONFLICT("weekId","name") DO UPDATE SET "quantity"=excluded."quantity","unit"=excluded."unit","category"=excluded."category"`,
+         ON CONFLICT("weekId","name","unit") DO UPDATE SET "quantity"=excluded."quantity","category"=excluded."category"`,
       ).run(
-        `manual-${crypto.createHash("sha1").update(`${selectedWeek}|${name}`).digest("hex").slice(0, 16)}`,
+        `manual-${crypto.createHash("sha1").update(`${selectedWeek}|${name}|${unit}`).digest("hex").slice(0, 16)}`,
         name,
         quantity,
         unit,
@@ -2169,16 +2210,26 @@ function manageGroceryForChat(payload, weekStart) {
         week.id,
       );
     } else if (operation === "delete") {
-      const result = db
-        .prepare('DELETE FROM "ShoppingItem" WHERE "weekId"=? AND "name"=?')
-        .run(week.id, name);
+      const unit = String(payload.unit ?? "").trim();
+      const result = unit
+        ? db
+            .prepare('DELETE FROM "ShoppingItem" WHERE "weekId"=? AND "name"=? AND "unit"=?')
+            .run(week.id, name, unit)
+        : db
+            .prepare('DELETE FROM "ShoppingItem" WHERE "weekId"=? AND "name"=?')
+            .run(week.id, name);
       if (!result.changes) throw new Error(`장보기에서 '${name}' 품목을 찾지 못했습니다.`);
     } else {
       if (typeof payload.purchased !== "boolean")
         throw new Error("구매 완료 여부가 필요합니다.");
-      const result = db
-        .prepare('UPDATE "ShoppingItem" SET "purchased"=? WHERE "weekId"=? AND "name"=?')
-        .run(payload.purchased ? 1 : 0, week.id, name);
+      const unit = String(payload.unit ?? "").trim();
+      const result = unit
+        ? db
+            .prepare('UPDATE "ShoppingItem" SET "purchased"=? WHERE "weekId"=? AND "name"=? AND "unit"=?')
+            .run(payload.purchased ? 1 : 0, week.id, name, unit)
+        : db
+            .prepare('UPDATE "ShoppingItem" SET "purchased"=? WHERE "weekId"=? AND "name"=?')
+            .run(payload.purchased ? 1 : 0, week.id, name);
       if (!result.changes) throw new Error(`장보기에서 '${name}' 품목을 찾지 못했습니다.`);
     }
     db.exec("COMMIT");

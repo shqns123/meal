@@ -120,4 +120,28 @@ for (let index = 0; index < 20; index += 1) {
   }).baseName, "선호메뉴", "가중치 0%인 기본메뉴는 자동 선택에서 제외한다.");
 }
 
+const pantryPriorityCatalog = flattenCatalog([
+  {sourceCategory:"메인반찬",baseName:"일반볶음",variantName:"일반볶음"},
+  {sourceCategory:"메인반찬",baseName:"임박재료조림",variantName:"임박재료조림"},
+  {sourceCategory:"메인반찬",baseName:"일반구이",variantName:"일반구이"},
+]).map((item) => ({
+  ...item,
+  selectionPriority: item.variantName === "임박재료조림" ? 1 : 0,
+}));
+for (let index = 0; index < 20; index += 1) {
+  assert.equal(chooseCatalogMenu({
+    catalog: pantryPriorityCatalog,
+    sourceCategories: ["메인반찬"],
+    date: "2026-09-10",
+    seed: `pantry-priority-${index}`,
+  }).variantName, "임박재료조림", "반복 제한을 통과한 임박 재료 메뉴는 다른 후보보다 먼저 선택한다.");
+}
+assert.notEqual(chooseCatalogMenu({
+  catalog: pantryPriorityCatalog,
+  sourceCategories: ["메인반찬"],
+  date: "2026-09-10",
+  seed: "pantry-priority-cooldown",
+  history: [{ date: "2026-09-09", ...pantryPriorityCatalog[1] }],
+}).variantName, "임박재료조림", "임박 재료 우선순위가 최근 메뉴 반복 제한을 해제하지 않는다.");
+
 console.log("catalog selection checks passed");

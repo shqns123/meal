@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     update: { endDate },
   });
   const item = await prisma.shoppingItem.upsert({
-    where: { weekId_name: { weekId: week.id, name } },
+    where: { weekId_name_unit: { weekId: week.id, name, unit: "개" } },
     create: {
       weekId: week.id,
       name,
