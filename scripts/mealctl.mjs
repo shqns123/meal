@@ -1056,7 +1056,7 @@ function weeklyAvoidForDate(date) {
 }
 function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage, pickSides }) {
   const menuWeights = catalogMenuWeights();
-  const pick = (sourceCategories, role, excludeCookingFamily = null) => {
+  const pick = (sourceCategories, role, excludeCookingFamily = null, excludedNames = new Set()) => {
     const selectionRole = role.startsWith("side") ? "SIDE"
       : role === "soup" ? "SOUP"
         : sourceCategories.includes("메인반찬") ? "MAIN" : "ONE_BOWL";
@@ -1066,6 +1066,7 @@ function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage,
         && matchesSelectionRole(item, selectionRole)
         && usage.get(`${catalogRole(item.sourceCategory)}|${normalizeName(item.variantName)}`) !== "AVOID"
         && (!excludeCookingFamily || item.cookingFamily !== excludeCookingFamily)
+        && !excludedNames.has(item.variantName)
         && !weeklyAvoid.some((avoid) => item.variantName.includes(avoid) || item.baseName.includes(avoid)))
         .map((item) => {
           const pantrySignal = pantrySelectionSignal(item, date);
@@ -1096,7 +1097,12 @@ function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage,
   let sides = null;
   if (pickSides) {
     const firstSide = pick(["밑반찬"], "side-1");
-    const secondSide = pick(["밑반찬"], "side-2", firstSide?.cookingFamily);
+    const excludedNames = new Set(firstSide ? [firstSide.name] : []);
+    let secondSide = pick(["밑반찬"], "side-2", firstSide?.cookingFamily, excludedNames);
+    // If no other cooking family survives the candidate rules, prefer a
+    // different named side over returning an incomplete two-side meal.
+    if (!secondSide && firstSide)
+      secondSide = pick(["밑반찬"], "side-2-fallback", null, excludedNames);
     sides = [firstSide, secondSide].filter(Boolean);
   }
   return { main, soup, sides };
