@@ -761,9 +761,13 @@ function runChatGroceryAction(decision) {
   if (!name)
     return { answer: "관리할 장보기 품목명을 알려주세요.", sources: [] };
   if (decision.intent !== "ADD_GROCERY") {
-    const matches = (current.shoppingItems || []).filter(
+    const candidates = (current.shoppingItems || []).filter(
       (item) => item.name === name || item.name.includes(name) || name.includes(item.name),
     );
+    const matches = candidates.filter(
+      (item) => `${item.name} ${item.quantity}${item.unit}` === name,
+    );
+    if (!matches.length) matches.push(...candidates);
     if (matches.length !== 1)
       return {
         answer: matches.length

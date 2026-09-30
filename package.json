@@ -24,6 +24,7 @@
     "test:recipe-source": "node scripts/test-recipe-source.mjs",
     "db:agent-migrate": "node scripts/migrate-agent-workflow.mjs",
     "db:attendance-migrate": "node scripts/migrate-attendance.mjs",
+    "db:shopping-units-migrate": "node scripts/migrate-shopping-item-unit-key.mjs",
     "mealctl": "node scripts/mealctl.mjs",
     "push:keys": "node scripts/generate-vapid-keys.mjs"
   },
