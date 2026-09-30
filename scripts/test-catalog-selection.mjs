@@ -136,6 +136,20 @@ for (let index = 0; index < 20; index += 1) {
   }).baseName, "선호메뉴", "가중치 0%인 기본메뉴는 자동 선택에서 제외한다.");
 }
 
+const disabledSideFallbackCatalog = flattenCatalog([
+  {sourceCategory: "밑반찬", baseName: "계란말이", variantName: "베이컨계란말이"},
+  {sourceCategory: "밑반찬", baseName: "장아찌", variantName: "마늘장아찌"},
+]).map((item) => ({ ...item, selectionWeight: item.baseName === "장아찌" ? 0 : 1 }));
+assert.equal(chooseCatalogMenu({
+  catalog: disabledSideFallbackCatalog,
+  sourceCategories: ["밑반찬"],
+  date: "2026-10-01",
+  seed: "disabled-side-fallback",
+  history: [{ date: "2026-09-30", ...disabledSideFallbackCatalog[0] }],
+  forceRelaxVariant: true,
+})?.variantName, "베이컨계란말이",
+"0% 부찬만 일반 후보로 남아도 선택기는 최근 사용한 활성 부찬으로 완화해야 한다.");
+
 const pantryPriorityCatalog = flattenCatalog([
   {sourceCategory:"메인반찬",baseName:"일반볶음",variantName:"일반볶음"},
   {sourceCategory:"메인반찬",baseName:"임박재료조림",variantName:"임박재료조림"},
