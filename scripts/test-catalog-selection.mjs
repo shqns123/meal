@@ -93,6 +93,22 @@ const coverageCatalog = flattenCatalog([
 ]);
 assert.ok(chooseCatalogMenu({catalog:coverageCatalog,sourceCategories:["메인반찬"],date:"2026-09-10",seed:"coverage",history:[{date:"2026-09-01",...coverageCatalog[0]},{date:"2026-09-01",...coverageCatalog[1]}]}), "세부메뉴 제외 비율이 25%를 넘으면 생성이 멈추지 않고 낮은 가중치로 완화한다.");
 
+const forcedRelaxCatalog = flattenCatalog([
+  {sourceCategory:"밑반찬",baseName:"최근 부찬",variantName:"최근 부찬"},
+  {sourceCategory:"밑반찬",baseName:"제외 1",variantName:"제외 1"},
+  {sourceCategory:"밑반찬",baseName:"제외 2",variantName:"제외 2"},
+  {sourceCategory:"밑반찬",baseName:"제외 3",variantName:"제외 3"},
+  {sourceCategory:"밑반찬",baseName:"제외 4",variantName:"제외 4"},
+]).map((item, index) => ({ ...item, selectionWeight: index ? 0 : 1 }));
+assert.equal(chooseCatalogMenu({
+  catalog: forcedRelaxCatalog,
+  sourceCategories: ["밑반찬"],
+  date: "2026-09-10",
+  seed: "forced-relax-variant",
+  history: [{date:"2026-09-09", ...forcedRelaxCatalog[0]}],
+  forceRelaxVariant: true,
+}).variantName, "최근 부찬", "후보가 없을 때는 세부메뉴 제한을 마지막으로 완화할 수 있어야 한다.");
+
 const roleCatalog = flattenCatalog([
   {sourceCategory:"메인반찬",baseName:"두부조림",variantName:"간장두부조림"},
   {sourceCategory:"메인반찬",baseName:"닭갈비",variantName:"춘천닭갈비"},
