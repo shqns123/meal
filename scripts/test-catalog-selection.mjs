@@ -17,6 +17,19 @@ const selected = chooseCatalogMenu({
 assert.notEqual(selected.variantName, "앞다리살제육볶음", "같은 세부 메뉴는 30일 동안 선택하지 않는다.");
 assert.equal(selected.baseName, "닭갈비", "다른 기본메뉴가 있으면 14일 이내 같은 기본메뉴는 후보에서 제외한다.");
 
+const proteinCatalog = flattenCatalog([
+  { sourceCategory: "메인반찬", baseName: "제육볶음", variantName: "간장제육볶음" },
+  { sourceCategory: "메인반찬", baseName: "닭갈비", variantName: "춘천닭갈비" },
+]);
+for (let index = 0; index < 20; index += 1) {
+  assert.equal(chooseCatalogMenu({ catalog: proteinCatalog, sourceCategories: ["메인반찬"],
+    date: "2026-10-08", seed: `pork-balance-${index}`, preferNonPork: true })?.primaryIngredient, "닭고기",
+  "돼지고기 중복을 피해야 할 때는 가능한 다른 단백질 메뉴를 우선한다.");
+}
+assert.equal(chooseCatalogMenu({ catalog: proteinCatalog.slice(0, 1), sourceCategories: ["메인반찬"],
+  date: "2026-10-08", seed: "pork-only", preferNonPork: true })?.primaryIngredient, "돼지고기",
+"다른 후보가 없으면 돼지고기 메뉴도 선택하여 생성을 중단하지 않는다.");
+
 const metadata = menuMetadata({ sourceCategory: "메인반찬", baseName: "갈치조림", variantName: "무갈치조림" });
 assert.equal(metadata.cookingFamily, "조림");
 assert.equal(metadata.primaryIngredient, "생선");

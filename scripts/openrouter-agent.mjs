@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { selectedMutationMonth } from "../lib/agent-request-utils.mjs";
+import { assertReviewDates } from "../lib/review-scope.mjs";
 
 const root = process.env.MEAL_PLAN_ROOT || process.cwd();
 const queuedPath = process.argv[2];
@@ -15,7 +16,7 @@ if (!queuedPath) throw new Error("Queued request file is required.");
 const task = JSON.parse(fs.readFileSync(queuedPath, "utf8"));
 const apiKey = process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim();
 const model = process.env.OPENROUTER_MODEL && process.env.OPENROUTER_MODEL.trim();
-if (!apiKey || !model) {
+if ((!apiKey || !model) && task.action !== "PUBLISH_WEEK") {
   fail("OpenRouter API 키 또는 모델이 설정되지 않았습니다.");
   process.exit(1);
 }
@@ -104,9 +105,9 @@ function systemPrompt(ruleFiles) {
     "만개의레시피 원문의 재료와 분량을 가족의 실제 식사 인원에 맞게 환산하고 단위를 구조화한다. 원문 문장과 이미지는 복사하지 말고 조리 순서를 의미가 유지되는 범위에서 다시 작성한다. 정확한 세부메뉴와 일치하는 개별 레시피를 찾지 못하면 비슷한 메뉴로 대체하지 말고 출처 검증 실패로 남긴다.",
     "입력 컨텍스트의 outputContract를 정확히 지키고, 수량은 숫자와 단위로, 조리 단계는 '1. '부터 시작한다. 브로콜리·파프리카·피망은 재료뿐 아니라 메뉴명·출처 제목·메모를 포함한 저장 JSON 어디에도 넣지 않는다. 같은 주의 같은 재료는 반드시 한 가지 단위만 사용한다(예: 당근은 모두 g, 애호박은 모두 g).",
     "dishPreferences의 lastPlannedAt은 해당 메뉴가 식단에 마지막으로 편성된 날짜다. 새 식단을 만들 때 최근 편성 메뉴의 반복 간격을 판단하는 참고 자료로 사용하되, 허용 여부·알레르기·사용자 요청보다 우선하지 않는다.",
-    "월간 컨텍스트의 menuCatalog는 만개의레시피에서 수집한 식사형태·조리계열·기본 메뉴·세부 메뉴 계층이다. selectionPreview는 AVOID 메뉴를 제외하고 ALLOW와 UNKNOWN 세부메뉴를 대상으로 최근 식단을 반영해 고른 후보이다. UNKNOWN은 미확인 상태 그대로 저장할 수 있으며 ALLOW로 추정하지 않는다. 기본 메뉴별 동일한 기본 확률과 세부 메뉴 30일·기본 메뉴 10~14일·유사메뉴그룹 5~8일·조리계열/주재료 2일 쿨다운을 참고한다. 월간 완성본에서는 이름만 다른 비슷한 주찬의 근접 반복, 조리법·주재료의 3일 연속 반복과 주간 쏠림을 피한다. 부찬 조합을 2~3일 유지하는 것은 의도된 반복이다.",
+    "menuCatalog는 만개의레시피에서 수집한 식사형태·조리계열·기본 메뉴·세부 메뉴 계층이다. selectionPreview는 AVOID 메뉴를 제외하고 ALLOW와 UNKNOWN 세부메뉴를 대상으로 최근 식단을 반영해 고른 후보이다. UNKNOWN은 미확인 상태 그대로 저장할 수 있으며 ALLOW로 추정하지 않는다. 기본 메뉴별 동일한 기본 확률과 세부 메뉴 30일·기본 메뉴 10~14일·유사메뉴그룹 5~8일·조리계열/주재료 2일 쿨다운을 참고한다. 주간 완성본에서는 이름만 다른 비슷한 주찬의 근접 반복, 조리법·주재료의 3일 연속 반복과 주간 쏠림을 피한다. 부찬 조합을 2~3일 유지하는 것은 의도된 반복이다.",
     "카탈로그의 정확한 세부메뉴명을 사용한다. selectionPreview의 sides는 3일 조리 묶음 후보이며 부찬 조합을 유지하는 데 참고한다. 가족 기피(AVOID), 이번 주 기피, 알레르기와 금지 식재료는 선택하지 않는다. 기본메뉴의 취향을 세부메뉴로 자동 전파하지 않는다. cookingMethods와 ingredientCategories는 만개의레시피 상단 기본메뉴 태그에 직접 표시된 값만 담는다. 태그가 빈 항목의 조리계열·주재료는 식단 선택 단계의 임시 추정값이며 원본 태그나 정확한 레시피 재료·알레르기 판정 근거가 아니다. 세부메뉴의 실제 레시피 재료·조리법이 확인되면 그 정보를 우선한다.",
-    "월간 식단은 먼저 mealStyle을 배치하고 메뉴를 선택한다. MAIN_DISH는 주찬 중심, SOUP_MEAL은 soup에 국/탕/찌개와 main에 간단한 주찬을 모두 넣는다. NOODLE_DUMPLING과 RICE_PORRIDGE_TTEOK는 main에 한그릇 메뉴를 둔다. soup은 SOUP_MEAL에서만 넣는다.",
+    "주간 식단은 먼저 mealStyle을 배치하고 메뉴를 선택한다. MAIN_DISH는 주찬 중심, SOUP_MEAL은 soup에 국/탕/찌개와 main에 간단한 주찬을 모두 넣는다. NOODLE_DUMPLING과 RICE_PORRIDGE_TTEOK는 main에 한그릇 메뉴를 둔다. soup은 SOUP_MEAL에서만 넣는다.",
     "[AGENTS.md]", ruleFiles.agents, "[MEAL.md]", ruleFiles.meal,
   ].join("\n");
 }
@@ -143,13 +144,6 @@ function validationProblems(validation) {
     return [validation.error.trim()];
   return ["검증기가 실패했지만 상세 오류를 반환하지 않았습니다. 컨테이너 로그를 확인해 주세요."];
 }
-function normalizeMonthPayload(payload, month) {
-  return {
-    ...(payload && typeof payload === "object" ? payload : {}),
-    schemaVersion: "meal-month.v1",
-    month,
-  };
-}
 function catalogDinnerForDate(change, current = null) {
   const contextForDate = current ?? monthContext(String(change?.date || "").slice(0, 7));
   const selection = (contextForDate?.menuCatalog?.selectionPreview || []).find((entry) => entry.date === change.date);
@@ -163,48 +157,6 @@ function catalogDinnerForDate(change, current = null) {
     sides: (selection.sides || []).map((item) => item.name).filter(Boolean),
     note: [change.note, "카탈로그 세부메뉴 자동 선택"].filter(Boolean).join(" · "),
   };
-}
-function applyCatalogDinnerSelections(payload, current, fromDate = null) {
-  const preview = new Map((current?.menuCatalog?.selectionPreview || []).map((entry) => [entry.date, entry]));
-  if (!preview.size) throw new Error("카탈로그 메뉴 후보를 읽지 못해 월간 식단을 생성할 수 없습니다.");
-  return {
-    ...payload,
-    mealChanges: (payload?.mealChanges || []).map((change) => {
-      const selection = preview.get(change.date);
-      if (!selection || (fromDate && change.date < fromDate)) return change;
-      const { baby, ...withoutAutoBaby } = change;
-      return {
-        ...withoutAutoBaby,
-        mealStyle: selection.mealStyle,
-        main: selection.main?.name || change.main,
-        soup: selection.soup?.name || null,
-        sides: (selection.sides || []).map((item) => item.name).filter(Boolean),
-        note: [change.note, "카탈로그 세부메뉴 자동 선택"].filter(Boolean).join(" · "),
-      };
-    }),
-  };
-}
-function normalizeMonthSideBatches(payload, fromDate = null) {
-  const changes = Array.isArray(payload?.mealChanges)
-    ? [...payload.mealChanges].sort((left, right) =>
-        String(left?.date || "").localeCompare(String(right?.date || "")),
-      )
-    : [];
-  const eligible = changes.filter(
-    (change) =>
-      (!fromDate || String(change?.date || "") >= fromDate) &&
-      Array.isArray(change?.sides) &&
-      change.sides.length === 2,
-  );
-  for (let index = 0; index < eligible.length;) {
-    const remaining = eligible.length - index;
-    const size = remaining === 4 ? 2 : Math.min(3, remaining);
-    const sides = [...eligible[index].sides];
-    for (const change of eligible.slice(index, index + size))
-      change.sides = [...sides];
-    index += size;
-  }
-  return { ...payload, mealChanges: changes };
 }
 function notify() {
   try {
@@ -259,26 +211,9 @@ function confirmationQuestion(decisions, instruction) {
     String(instruction || ""),
   );
   if (confirmed) return null;
-  const broad = decisions.find(
-    (decision) =>
-      decision.intent === "RESET_MONTH" ||
-      decision.intent === "DELETE_RECIPE" && decision.all === true,
-  );
+  const broad = decisions.find((decision) => decision.intent === "DELETE_RECIPE" && decision.all === true);
   if (!broad) return null;
-  if (broad.intent === "RESET_MONTH" && explicitMonthReplacement(instruction))
-    return null;
-  return broad.intent === "RESET_MONTH"
-    ? `${broad.month} 식단을 재설정하면 해당 범위의 기존 메뉴·레시피·자동 장보기가 교체됩니다. 계속하려면 ‘확인했어, 진행해줘’라고 답해 주세요.`
-    : `${broad.weekStart} 주차의 레시피를 모두 삭제하면 자동 장보기도 다시 계산됩니다. 계속하려면 ‘확인했어, 진행해줘’라고 답해 주세요.`;
-}
-function explicitMonthReplacement(instruction) {
-  const text = String(instruction || "").replace(/\s+/g, " ");
-  return /(재설정|다시\s*(?:짜|만들|구성)|새로\s*(?:짜|만들|구성)|처음부터|갈아엎|전체(?:를|적으로)?\s*(?:바꿔|변경|교체)|전부\s*(?:바꿔|변경|교체)|(?:부터|이후).*(?:바꿔|변경|교체|다시))/.test(text);
-}
-function isExplicitMonthReplacementRequest(instruction) {
-  const text = String(instruction || "").replace(/\s+/g, " ");
-  const mentionsWholeMonth = /(?:월간\s*(?:식단|메뉴)|(?:20\d{2}\s*년\s*)?\d{1,2}\s*월(?:의)?\s*(?:전체\s*)?(?:식단|메뉴)|(?:이번|다음)\s*달(?:의)?\s*(?:식단|메뉴))/.test(text);
-  return mentionsWholeMonth && explicitMonthReplacement(text);
+  return `${broad.weekStart} 주차의 레시피를 모두 삭제하면 자동 장보기도 다시 계산됩니다. 계속하려면 ‘확인했어, 진행해줘’라고 답해 주세요.`;
 }
 function currentKstDate() {
   return new Intl.DateTimeFormat("en-CA", {
@@ -308,13 +243,13 @@ async function classifyChatMutations(ruleFiles) {
       intent: "CLARIFY",
       answer: "현재는 식재료의 실제 판매 가격 데이터가 없어 정확한 금액 상한을 보장할 수 없습니다. 저렴한 재료 중심으로 구성할 수는 있지만, 금액 제한을 적용하려면 기준 가격이나 최근 장보기 가격이 필요합니다.",
     }];
-  if (validMonth(targetMonth) && isExplicitMonthReplacementRequest(task.message))
-    return [{ intent: "RESET_MONTH", month: targetMonth, weekStart: task.weekStart }];
+  if (/(?:월간\s*(?:식단|메뉴)|(?:20\d{2}\s*년\s*)?\d{1,2}\s*월(?:의)?\s*(?:전체\s*)?(?:식단|메뉴)|(?:이번|다음)\s*달(?:의)?\s*(?:식단|메뉴))/.test(String(task.message || "")))
+    return [{ intent: "CLARIFY", answer: "월간 식단 생성은 종료했습니다. 구성할 주차의 날짜를 알려주세요." }];
   const result = await ask(
     systemPrompt(ruleFiles) +
       `\n\n사용자의 변경 요청을 실행 순서대로 하나 이상의 앱 기능으로 분류한다. 실제 변경은 하지 말고 아래 JSON만 반환한다.
-intent는 UPDATE_MEALS, GENERATE_MONTH, RESET_MONTH, REGENERATE_RECIPES, ADD_RECIPE, DELETE_RECIPE, REGENERATE_GROCERY, ADD_GROCERY, DELETE_GROCERY, SET_GROCERY_PURCHASED, MANAGE_PANTRY, UPDATE_FAMILY, UPDATE_WEEKLY_REVIEW, UPDATE_PREFERENCE, UPDATE_ATTENDANCE, CLARIFY 중 하나다.
-월간 식단이 없는 달을 만들어 달라는 요청은 GENERATE_MONTH다. 이미 식단이 있는 달을 다시 짜기·새로 만들기·바꾸기·교체하기·처음부터 구성하기처럼 요청하면 특정 단어 사용 여부와 관계없이 RESET_MONTH다.
+intent는 UPDATE_MEALS, GENERATE_WEEK, REGENERATE_RECIPES, ADD_RECIPE, DELETE_RECIPE, REGENERATE_GROCERY, ADD_GROCERY, DELETE_GROCERY, SET_GROCERY_PURCHASED, MANAGE_PANTRY, UPDATE_FAMILY, UPDATE_WEEKLY_REVIEW, UPDATE_PREFERENCE, UPDATE_ATTENDANCE, CLARIFY 중 하나다.
+식단이 없는 특정 주를 만들어 달라는 요청은 GENERATE_WEEK다. 월간 생성은 지원하지 않으며 월 전체 요청에는 주차를 물어보는 CLARIFY를 반환한다.
 레시피 추가는 반드시 현재 식단에 있는 메뉴의 레시피를 보충하는 의미다. 레시피 삭제는 제목이 특정되어야 한다.
 냉장고·펜트리·보유 재료의 추가·수정·증감·삭제는 MANAGE_PANTRY다. 가족의 알레르기·씹기·매운맛·선호 메모 변경은 UPDATE_FAMILY다. 이번 주만 먹고 싶은 음식·피할 음식·주간 메모 저장은 UPDATE_WEEKLY_REVIEW다. 이 경우 지속 취향을 변경하지 않는다.
 구체적인 메뉴에 대해 앞으로 넣어줘·앞으로 빼줘·먹어봤어·생소해처럼 지속 취향이나 익숙함을 알려주면 UPDATE_PREFERENCE다. 식단 편성이나 레시피 존재로 취향을 추론하지 않는다. usage와 familiarity는 독립이며 사용자가 말한 필드만 포함한다. 가족 대상이 생략된 일반 요청은 family, 아기만 등의 명시가 있으면 해당 role이다. 오늘 메뉴·이것 등의 지시어는 현재 컨텍스트로 단일 메뉴를 식별할 수 없으면 CLARIFY다. 취향 저장만 요청했으면 UPDATE_MEALS를 추가하지 않는다. '잘 먹었어'만으로 ALLOW를 기록하지 않는다. 메뉴 구분은 현재 후보로 확인하고 여러 구분에 있으면 CLARIFY다.
@@ -328,7 +263,7 @@ intent는 UPDATE_MEALS, GENERATE_MONTH, RESET_MONTH, REGENERATE_RECIPES, ADD_REC
   );
   const classified = modelJson(result.content);
   const allowed = new Set([
-    "UPDATE_MEALS", "GENERATE_MONTH", "RESET_MONTH", "REGENERATE_RECIPES",
+    "UPDATE_MEALS", "GENERATE_WEEK", "REGENERATE_RECIPES",
     "ADD_RECIPE", "DELETE_RECIPE", "REGENERATE_GROCERY", "ADD_GROCERY",
     "DELETE_GROCERY", "SET_GROCERY_PURCHASED", "MANAGE_PANTRY",
     "UPDATE_FAMILY", "UPDATE_WEEKLY_REVIEW", "UPDATE_PREFERENCE", "UPDATE_ATTENDANCE", "CLARIFY",
@@ -348,58 +283,11 @@ intent는 UPDATE_MEALS, GENERATE_MONTH, RESET_MONTH, REGENERATE_RECIPES, ADD_REC
         : validDate(decision.date)
           ? sundayForDate(decision.date)
           : task.weekStart;
-      if (
-        decision.intent === "GENERATE_MONTH" &&
-        validMonth(decision.month) &&
-        monthContext(decision.month).existingMonthMeals?.length
-      ) decision.intent = "RESET_MONTH";
       return decision;
     });
   return decisions.length
     ? decisions
     : [{ intent: "CLARIFY", answer: "어떤 항목을 어떻게 변경할지 조금 더 구체적으로 알려주세요." }];
-}
-function selectedResetStartDate(message, month) {
-  const text = String(message || "");
-  if (!/(?:부터|이후)/.test(text)) return null;
-  const full = text.match(
-    /(20\d{2})\s*[년./-]\s*(1[0-2]|0?[1-9])\s*[월./-]\s*(3[01]|[12]?\d)\s*일?\s*(?:부터|이후)/,
-  );
-  const candidate = full
-    ? `${full[1]}-${String(Number(full[2])).padStart(2, "0")}-${String(Number(full[3])).padStart(2, "0")}`
-    : (() => {
-        const day = text.match(/(3[01]|[12]?\d)\s*일\s*(?:부터|이후)/);
-        return day
-          ? `${month}-${String(Number(day[1])).padStart(2, "0")}`
-          : null;
-      })();
-  return candidate && validDate(candidate) && candidate.startsWith(`${month}-`)
-    ? candidate
-    : null;
-}
-function preserveMonthBefore(payload, current, fromDate) {
-  if (!fromDate) return payload;
-  const preserved = (current.existingMonthMeals || [])
-    .filter((meal) => meal.date < fromDate)
-    .map((meal) => ({
-      date: meal.date,
-      lunch: meal.lunchPlan,
-      main: meal.mainDish,
-      soup: meal.soupDish || undefined,
-      mealStyle: meal.mealStyle || "MAIN_DISH",
-      sides: meal.sides,
-      baby: meal.babyMenu || undefined,
-      note: meal.cookingNote || undefined,
-    }));
-  const replacements = Array.isArray(payload?.mealChanges)
-    ? payload.mealChanges.filter((meal) => String(meal?.date || "") >= fromDate)
-    : [];
-  return {
-    ...payload,
-    mealChanges: [...preserved, ...replacements].sort((a, b) =>
-      String(a.date).localeCompare(String(b.date)),
-    ),
-  };
 }
 function sundayForDate(date) {
   const value = new Date(`${date}T00:00:00Z`);
@@ -449,9 +337,11 @@ async function runChatMealChange(ruleFiles) {
   if (dates.some((date) => !existingDates.has(date)))
     throw new Error("요청한 날짜 중 저장된 식단이 없는 날이 있습니다.");
   const validatedChanges = [];
+  const expectedRevisions = {};
   for (const change of changes) {
     const weekStart = sundayForDate(change.date);
     const current = context(weekStart);
+    expectedRevisions[change.date] = current.meals?.find((meal) => meal.date === change.date)?.revision;
     let dayPayload = {
       schemaVersion: "meal-week.v1",
       weekStart,
@@ -478,6 +368,7 @@ async function runChatMealChange(ruleFiles) {
     schemaVersion: "meal-days.v1",
     changeReason: String(requested.changeReason || task.message).slice(0, 1000),
     mealChanges: validatedChanges,
+    expectedRevisions,
   };
   const publishResult = JSON.parse(String(publish("publish-days", writeInput("chat-days", combinedPayload), [])));
   const weeks = [...new Set(dates.map(sundayForDate))];
@@ -502,77 +393,6 @@ async function runChatMealChange(ruleFiles) {
       + (publishResult.overallQuality?.highWarnings?.length
         ? ` 최종 식단 품질 ${publishResult.overallQuality.score}/100이며 높은 경고 ${publishResult.overallQuality.highWarnings.length}건이 남았습니다.` : ""),
     sources: citations(result.annotations),
-  };
-}
-
-async function runChatMonthAction(ruleFiles, decision) {
-  const month = validMonth(decision.month) ? decision.month : task.targetMonth;
-  if (!validMonth(month))
-    return { answer: "생성하거나 재설정할 연도와 월을 알려주세요.", sources: [] };
-  const current = monthContext(month);
-  const replacing = decision.intent === "RESET_MONTH";
-  const replaceFrom = replacing
-    ? selectedResetStartDate(task.message, month)
-    : null;
-  if (current.existingMonthMeals?.length && !replacing)
-    return {
-      answer: `${month} 월간 식단이 이미 있습니다. 전체를 다시 짤지, 특정 날짜부터 바꿀지 알려주세요.`,
-      sources: [],
-    };
-  const result = await ask(
-    systemPrompt(ruleFiles),
-    `[월간 컨텍스트]\n${JSON.stringify(current)}\n[사용자 요청]\n${task.message}\n` +
-      `카탈로그 selectionPreview에 제시된 날짜별 저녁(main, soup, sides, mealStyle)은 코드가 최종 적용한다. 그 메뉴명을 바꾸거나 새 메뉴를 창작하지 말고 점심과 일정·메모만 유효하게 작성한다. ${month}의 모든 날짜를 한 번씩 포함한 meal-month.v1 JSON만 반환한다. ` +
-      (replaceFrom
-        ? `${replaceFrom} 이전 식단은 existingMonthMeals와 완전히 동일하게 유지하고, ${replaceFrom}부터 월말까지만 새로 구성한다. `
-        : "") +
-      "각 날짜에 mealStyle을 반드시 넣는다. 메인반찬 중심 4일, 국/탕/찌개 중심 1~2일, 면/만두 1일을 주간 출발점으로 사용하고 남은 날은 밥/죽/떡으로 채우되, 월간 날짜 수에 맞춰 고르게 배치한다. 부찬 2개는 동일한 조합을 2~3일 연속 유지하고 특별한 이유 없이 매일 바꾸지 않는다. 레시피와 장보기는 만들지 않는다. 기존 월을 교체하더라도 날짜 상세의 가족 일정은 유지한다.",
-    false,
-  );
-  const scope = `${month}의 모든 날짜를 한 번씩 포함하며 ${replaceFrom ? `${replaceFrom} 이전은 유지하고 그날부터 월말까지만 교체하는` : "월 전체를 교체하는"} 월간 식단이다. 각 날짜에 유효한 mealStyle을 넣고, SOUP_MEAL에는 soup과 간단한 main을 모두 넣는다. AVOID 메뉴는 저장하지 않으며 UNKNOWN 메뉴는 사용할 수 있다. 부찬 조합은 2~3일씩 유지하며 레시피와 장보기는 만들지 않는다.`;
-  const normalizeCandidate = (candidate) => applyCatalogDinnerSelections(
-    normalizeMonthSideBatches(
-      preserveMonthBefore(normalizeMonthPayload(candidate, month), current, replaceFrom),
-      replaceFrom,
-    ),
-    current,
-    replaceFrom,
-  );
-  let payload = normalizeCandidate(modelJson(result.content));
-  payload = await completePayload(
-    payload,
-    current,
-    ruleFiles,
-    scope,
-    (candidate) => validate(
-      "validate-month",
-      normalizeCandidate(candidate),
-      ["--month", month, ...(replacing ? ["--replace", "true"] : []), ...(replaceFrom ? ["--replace-from", replaceFrom] : [])],
-    ),
-    false,
-    6,
-    false,
-    task.message,
-  );
-  payload = normalizeCandidate(payload);
-  const published = publish(
-    "publish-month",
-    writeInput(`chat-month-${month}`, payload),
-    [
-      "--month",
-      month,
-      ...(replacing ? ["--replace", "true"] : []),
-      ...(replaceFrom ? ["--replace-from", replaceFrom] : []),
-    ],
-  );
-  const publishResult = JSON.parse(String(published));
-  const remainingWarnings = Array.isArray(publishResult.warnings) ? publishResult.warnings : [];
-  return {
-    answer: (replacing
-      ? `${replaceFrom ?? month}부터 월말까지 식단을 새 구성으로 재설정했습니다. 변경 범위의 기존 레시피와 자동 장보기 항목은 정리했으며 이전 식단과 날짜별 가족 일정은 유지했습니다.`
-      : `${month} 월간 식단을 생성했습니다.`)
-      + (remainingWarnings.length ? ` 식단 품질 경고 ${remainingWarnings.length}건이 남았습니다(점수 ${publishResult.qualityScore}/100): ${remainingWarnings.slice(0, 2).join("; ")}` : ""),
-    sources: [],
   };
 }
 
@@ -616,7 +436,7 @@ async function generateWeekRecipes(ruleFiles, weekStart, instruction) {
     Math.max(4, 22 - (current.reusableRecipes?.length || 0)),
   );
   const scope =
-    "월간 식단 메뉴는 바꾸지 않는다. mealChanges는 빈 배열이다. 선택 주의 저녁 주찬·부찬과 집에서 먹는 주말 점심 레시피를 빠짐없이 준비한다. " +
+    "주간 식단 메뉴는 바꾸지 않는다. mealChanges는 빈 배열이다. 선택 주의 저녁 주찬·부찬과 집에서 먹는 주말 점심 레시피를 빠짐없이 준비한다. " +
     instruction;
   const result = await ask(
     systemPrompt(ruleFiles),
@@ -634,6 +454,7 @@ async function generateWeekRecipes(ruleFiles, weekStart, instruction) {
     true,
     searchBudget,
   );
+  payload.expectedRevisions = Object.fromEntries(current.meals.map((meal) => [meal.date, meal.revision]));
   publish(
     "publish-recipes",
     writeInput(`chat-recipes-${weekStart}`, payload),
@@ -881,8 +702,14 @@ async function dispatchChatMutation(ruleFiles, decision) {
       sources: [],
     };
   if (decision.intent === "UPDATE_MEALS") return runChatMealChange(ruleFiles);
-  if (["GENERATE_MONTH", "RESET_MONTH"].includes(decision.intent))
-    return runChatMonthAction(ruleFiles, decision);
+  if (decision.intent === "GENERATE_WEEK") {
+    const week = decision.weekStart;
+    if (context(week).meals?.length)
+      return { answer: `${week} 주차 식단은 이미 있습니다. 다시 구성하려면 주간 식단 화면의 ‘다시 구성’을 사용해 주세요.`, sources: [] };
+    const payload = JSON.parse(ctl("generate-catalog-week", "--week", week));
+    publish("publish-new-week", writeInput("chat-week-" + week, payload), ["--week", week]);
+    return { answer: `${week}부터 일주일 식단을 생성했습니다. 레시피와 장보기는 별도로 준비해야 합니다.`, sources: [] };
+  }
   if (["REGENERATE_RECIPES", "ADD_RECIPE", "DELETE_RECIPE"].includes(decision.intent))
     return runChatRecipeAction(ruleFiles, decision);
   if (["REGENERATE_GROCERY", "ADD_GROCERY", "DELETE_GROCERY", "SET_GROCERY_PURCHASED"].includes(decision.intent))
@@ -1075,46 +902,29 @@ async function runChat() {
 }
 
 async function runPlanner() {
+  if (task.action === "PUBLISH_WEEK") {
+    const current = context(task.weekStart);
+    if (current.meals?.length)
+      throw new Error(`${task.weekStart} 주차 식단이 이미 있어 자동 생성으로 덮어쓰지 않습니다.`);
+    const input = writeInput("new-week-" + task.weekStart,
+      JSON.parse(ctl("generate-catalog-week", "--week", task.weekStart)));
+    publish("publish-new-week", input, ["--week", task.weekStart, "--request-id", task.requestId]);
+    notify(); return;
+  }
   if (task.action === "REGENERATE_GROCERY") {
     ctl("rebuild-shopping", "--week", task.weekStart, "--request-id", task.requestId);
     notify(); return;
   }
   const ruleFiles = rules();
   if (task.action === "PUBLISH_MONTH") {
-    const current = monthContext(task.targetMonth);
-    if (current.existingMonthMeals?.length)
-      throw new Error(task.targetMonth + " 월간 식단은 이미 저장되어 있어 덮어쓰지 않습니다.");
-    const result = await ask(systemPrompt(ruleFiles),
-      "[월간 컨텍스트]\n" + JSON.stringify(current) + "\n[요청]\n" + task.prompt +
-      "\n카탈로그 selectionPreview의 저녁 메뉴(main, soup, sides, mealStyle)는 코드가 최종 적용한다. 새 저녁 메뉴를 창작하지 말고 점심과 일정·메모만 작성한다. " + task.targetMonth + "의 모든 날짜를 포함한 meal-month.v1 JSON만 반환한다. 부찬 2개는 같은 조합을 2~3일 연속 유지하며 하루마다 바꾸지 않는다. 레시피·장보기는 만들지 않는다.");
-    const scope = task.targetMonth + "의 모든 날짜를 한 번씩 포함하고 부찬 조합은 2~3일씩 유지하는 월간 식단이며 레시피와 장보기는 만들지 않는다.";
-    const normalizeCandidate = (candidate) => applyCatalogDinnerSelections(
-      normalizeMonthSideBatches(normalizeMonthPayload(candidate, task.targetMonth)),
-      current,
-    );
-    let payload = normalizeCandidate(modelJson(result.content));
-    payload = await completePayload(
-      payload,
-      current,
-      ruleFiles,
-      scope,
-      (candidate) => validate(
-        "validate-month",
-        normalizeCandidate(candidate),
-        ["--month", task.targetMonth],
-      ),
-    false,
-    6,
-    false,
-  );
-    payload = normalizeCandidate(payload);
-    publish("publish-month", writeInput("month-" + task.targetMonth, payload),
-      ["--month", task.targetMonth, "--request-id", task.requestId]);
-    notify(); return;
+    throw new Error("월간 자동 생성은 종료되었습니다. 주간 식단 생성으로 다시 요청해 주세요.");
   }
 
   const current = context(task.weekStart);
   if (task.action === "REVIEW_WEEK") {
+    if (current.meals?.length !== 7)
+      throw new Error(`${task.weekStart} 주차 식단이 7일 모두 저장된 뒤에 점검할 수 있습니다.`);
+    const referenceDate = current.weeklyReview?.referenceDate || task.weekStart;
     const result = await ask(
       systemPrompt(ruleFiles) + "\n\n주간 점검이다. referenceDate부터 토요일까지만 판단한다. selectionPreview의 urgentPantryMatches는 저장된 세부메뉴 레시피 재료와 보유 재료를 대조한 결과다. 소비기한이 3일 이내인 재료가 있고 현재 식단보다 해당 재료를 자연스럽게 소진할 후보가 있으면 그 날짜의 메뉴를 변경한다. 이미 현재 메뉴로 충분히 소진하거나 기피·알레르기·반복 제한과 충돌하면 유지할 수 있다. 유지하면 {\"decision\":\"maintain\",\"summary\":\"...\"}; 수정하면 {\"decision\":\"change\",\"changeReason\":\"...\",\"mealChanges\":[...]}를 반환한다. 레시피는 후속 작업에서 별도로 생성한다.",
       "[주간 컨텍스트]\n" + JSON.stringify(current) + "\n[사용자 점검 정보]\n" + task.prompt,
@@ -1122,11 +932,16 @@ async function runPlanner() {
     );
     let payload = modelJson(result.content);
     if (payload.decision === "maintain") {
+      const latest = context(task.weekStart);
+      if (latest.selectionRevision !== current.selectionRevision || latest.meals?.some((meal, index) => meal.revision !== current.meals[index]?.revision))
+        throw new Error("주간 점검 중 설정 또는 식단이 변경되었습니다. 다시 점검해 주세요.");
       ctl("record-review", "--week", task.weekStart, "--summary", String(payload.summary || "현재 식단을 유지합니다."), "--request-id", task.requestId);
       notify(); return;
     }
     if (payload.decision !== "change" || !Array.isArray(payload.mealChanges) || !payload.mealChanges.length)
       throw new Error("주간 점검 결과 형식이 올바르지 않습니다.");
+    assertReviewDates(payload.mealChanges, task.weekStart, referenceDate);
+    const reviewedChanges = [];
     for (const rawChange of payload.mealChanges) {
       const change = catalogDinnerForDate(rawChange, current);
       let dayPayload = { schemaVersion: "meal-week.v1", weekStart: task.weekStart,
@@ -1149,9 +964,18 @@ async function runPlanner() {
         `${task.prompt || ""}\n${current.weeklyReview?.wantedFoods || ""}`,
       );
       dayPayload.recipes = [];
-      publish("publish-day", writeInput("review-" + change.date, dayPayload),
-        ["--week", task.weekStart, "--date", change.date]);
+      const verified = dayPayload.mealChanges?.[0];
+      if (verified?.date !== change.date)
+        throw new Error("주간 점검 보정 결과가 요청 날짜를 벗어났습니다.");
+      reviewedChanges.push(verified);
     }
+    assertReviewDates(reviewedChanges, task.weekStart, referenceDate);
+    publish("publish-days", writeInput("review-" + task.weekStart, {
+      schemaVersion: "meal-days.v1", changeReason: String(payload.changeReason || "주간 점검 결과 식단을 조정했습니다."),
+      mealChanges: reviewedChanges, recipes: [],
+      selectionRevision: current.selectionRevision,
+      expectedRevisions: Object.fromEntries(current.meals.map((meal) => [meal.date, meal.revision])),
+    }), []);
     let summary = String(payload.changeReason || "주간 점검 결과 식단을 조정했습니다.");
     try {
       await generateWeekRecipes(
@@ -1164,7 +988,7 @@ async function runPlanner() {
       console.warn("Weekly meals were saved but recipe refresh failed:", error instanceof Error ? error.message : error);
       summary += " 식단은 저장했지만 레시피와 장보기 갱신은 완료하지 못했습니다.";
     }
-    ctl("record-review", "--week", task.weekStart, "--summary", summary, "--request-id", task.requestId);
+    ctl("record-review", "--week", task.weekStart, "--summary", summary, "--request-id", task.requestId, "--changed", "true");
     notify(); return;
   }
 
@@ -1172,8 +996,8 @@ async function runPlanner() {
   const scope = isDaily
     ? "선택 날짜 " + task.date + " 식단만 변경한다. mealChanges는 그 날짜 하나만 포함하고 recipes는 빈 배열로 둔다."
     : task.action === "REGENERATE_RECIPES"
-      ? "월간 캘린더 메뉴는 절대 바꾸지 않는다. mealChanges는 빈 배열이다. 선택 주의 저녁 주찬·부찬과 집에서 먹는 주말 점심 레시피를 모두 만든다."
-      : "월간 캘린더 메뉴는 절대 바꾸지 않는다. mealChanges는 빈 배열이다. 선택 주의 레시피를 모두 만들고 장보기에 쓸 수 있게 한다.";
+      ? "주간 식단 메뉴는 절대 바꾸지 않는다. mealChanges는 빈 배열이다. 선택 주의 저녁 주찬·부찬과 집에서 먹는 주말 점심 레시피를 모두 만든다."
+      : "주간 식단 메뉴는 절대 바꾸지 않는다. mealChanges는 빈 배열이다. 선택 주의 레시피를 모두 만들고 장보기에 쓸 수 있게 한다.";
 
   if (!isDaily && current.reusableRecipes?.length) {
     const reusablePayload = {
@@ -1182,6 +1006,7 @@ async function runPlanner() {
       changeReason: "SQLite에서 검증된 동일 메뉴 레시피를 재사용했습니다.",
       mealChanges: [],
       recipes: current.reusableRecipes,
+      expectedRevisions: Object.fromEntries((current.meals ?? []).map((meal) => [meal.date, meal.revision])),
     };
     if (validate("validate-week", reusablePayload, ["--week", task.weekStart]).valid) {
       const input = writeInput("reused-week-" + task.weekStart, reusablePayload);
@@ -1218,6 +1043,8 @@ async function runPlanner() {
     searchBudget,
   );
   if (isDaily) payload.recipes = [];
+  payload.expectedRevisions = Object.fromEntries((current.meals ?? []).map((meal) => [meal.date, meal.revision]));
+  if (isDaily) payload.selectionRevision = current.selectionRevision;
   const input = writeInput((isDaily ? "day-" + task.date : "week-" + task.weekStart), payload);
   if (isDaily) {
     publish("publish-day", input, ["--week", task.weekStart, "--date", task.date, "--request-id", task.requestId]);

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { preferenceContext, savePreference, validateMealPreferences } from "./dish-preferences.mjs";
+import { splitWeeklyFoods, weeklyWishBoost } from "../lib/weekly-wishes.mjs";
 import {
   missingRecipeCoverage,
   requiresLunchRecipe,
@@ -34,13 +35,14 @@ if (
   ![
     "context",
     "context-month",
-    "generate-catalog-month",
+    "generate-catalog-week",
     "generate-catalog-day",
+    "validate-new-week",
+    "publish-new-week",
+    "prune-future-meals",
     "refresh-dish-history",
     "validate-week",
-    "validate-month",
     "publish-week",
-    "publish-month",
     "publish-recipes",
     "validate-day",
     "publish-day",
@@ -84,9 +86,11 @@ function usage() {
   node scripts/mealctl.mjs context-month --month YYYY-MM
   node scripts/mealctl.mjs refresh-dish-history
   node scripts/mealctl.mjs validate-week --input /path/week.json [--week YYYY-MM-DD]
-  node scripts/mealctl.mjs validate-month --input /path/month.json --month YYYY-MM [--replace true]
+  node scripts/mealctl.mjs generate-catalog-week --week YYYY-MM-DD
+  node scripts/mealctl.mjs validate-new-week --input /path/week.json --week YYYY-MM-DD
+  node scripts/mealctl.mjs publish-new-week --input /path/week.json --week YYYY-MM-DD [--request-id ID]
+  node scripts/mealctl.mjs prune-future-meals --from YYYY-MM-DD --confirm true
   node scripts/mealctl.mjs publish-week --input /path/week.json --week YYYY-MM-DD [--request-id ID]
-  node scripts/mealctl.mjs publish-month --input /path/month.json --month YYYY-MM [--replace true] [--replace-from YYYY-MM-DD] [--request-id ID]
   node scripts/mealctl.mjs publish-recipes --input /path/week.json --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs validate-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD
   node scripts/mealctl.mjs publish-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD [--request-id ID]
@@ -115,8 +119,13 @@ function fail(message) {
 function printJson(value) {
   console.log(JSON.stringify(value, null, 2));
 }
+function isRealDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value ?? "")) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
 function requireWeek(value) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value ?? ""))
+  if (!isRealDate(value))
     fail("--week must be YYYY-MM-DD.");
   const date = new Date(`${value}T00:00:00Z`);
   if (Number.isNaN(date.valueOf()) || date.getUTCDay() !== 0)
@@ -162,6 +171,31 @@ function formatKst(value) {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date(value));
+}
+
+function selectionRevision(weekStart) {
+  const start = toMillis(weekStart), end = toMillis(addDays(weekStart, 7));
+  const rows = [
+    db.prepare('SELECT * FROM "WeeklyReview" WHERE "weekStart"=?').all(start),
+    db.prepare('SELECT * FROM "PantryItem" ORDER BY "id"').all(),
+    db.prepare('SELECT * FROM "FamilySchedule" WHERE "date">=? AND "date"<? ORDER BY "id"').all(start, end),
+    db.prepare('SELECT * FROM "FamilyMember" ORDER BY "id"').all(),
+    db.prepare('SELECT * FROM "DishPreference" ORDER BY "id"').all(),
+    db.prepare('SELECT * FROM "CatalogMenuWeight" ORDER BY "sourceCategory","baseName"').all(),
+  ];
+  return crypto.createHash("sha256").update(JSON.stringify(rows)).digest("hex");
+}
+function assertExpectedRevisions(payload, dates) {
+  if (payload.expectedRevisions === undefined) return;
+  if (!payload.expectedRevisions || typeof payload.expectedRevisions !== "object" || Array.isArray(payload.expectedRevisions))
+    throw new Error("식단 변경 기준 정보가 올바르지 않습니다.");
+  const revisionForDate = db.prepare('SELECT "updatedAt" FROM "MealPlan" WHERE "date"=?');
+  for (const date of dates) {
+    const expected = payload.expectedRevisions[date];
+    const actual = revisionForDate.get(toMillis(date));
+    if (!Number.isSafeInteger(expected) || !actual || Number(actual.updatedAt) !== expected)
+      throw new Error(`${date} 식단이 생성 중 다른 요청으로 변경되었습니다. 새로고침 후 다시 시도해 주세요.`);
+  }
 }
 function parseJsonList(value) {
   try {
@@ -286,7 +320,7 @@ function loadContext(weekStart, seedSalt = "") {
   ).all(toMillis(addDays(weekStart, -30)), startMs);
   const weeklyPreview = catalogSelectionPreview({
     catalog: catalogItems,
-    dates: mealRows.map((meal) => formatKst(meal.date)),
+    dates: Array.from({ length: 7 }, (_, index) => addDays(weekStart, index)),
     history: catalogHistory(catalogItems, recentRows),
     month: weekStart,
     usage: catalogUsage(), seedSalt,
@@ -369,6 +403,7 @@ function loadContext(weekStart, seedSalt = "") {
     })),
     meals: mealRows.map((meal) => ({
       date: formatKst(meal.date),
+      revision: Number(meal.updatedAt),
       lunch: meal.lunchPlan,
       main: meal.mainDish,
       soup: meal.soupDish,
@@ -388,6 +423,7 @@ function loadContext(weekStart, seedSalt = "") {
             : weekStart,
         }
       : null,
+    selectionRevision: selectionRevision(weekStart),
     existingRecipes,
     shoppingItems: shoppingItems.map((item) => ({
       ...item,
@@ -811,97 +847,59 @@ function validateDay(payload, weekStart, date) {
   return validatePayload(payload, weekStart, date, false);
 }
 
-function validateMonth(payload, month, allowExisting = false) {
-  const selectedMonth = requireMonth(month);
-  const dates = monthDates(selectedMonth);
+function validateNewWeek(payload, weekStart) {
+  const week = requireWeek(weekStart);
+  const dates = Array.from({ length: 7 }, (_, index) => addDays(week, index));
   const errors = [];
   const warnings = [];
-  if (payload?.schemaVersion && payload.schemaVersion !== "meal-month.v1")
-    errors.push("schemaVersion must be meal-month.v1.");
-  if (payload?.month !== selectedMonth)
-    errors.push(`month must be ${selectedMonth}.`);
-  if (!String(payload?.changeReason ?? "").trim())
-    errors.push("changeReason is required.");
-  if (!Array.isArray(payload?.mealChanges)) errors.push("mealChanges must be an array.");
   const changes = Array.isArray(payload?.mealChanges) ? payload.mealChanges : [];
+  if (payload?.schemaVersion !== "meal-week.v1") errors.push("schemaVersion must be meal-week.v1.");
+  if (payload?.weekStart !== week) errors.push(`weekStart must be ${week}.`);
+  if (!String(payload?.changeReason ?? "").trim()) errors.push("changeReason is required.");
+  if (!Array.isArray(payload?.mealChanges)) errors.push("mealChanges must be an array.");
+  if (!Array.isArray(payload?.recipes) || payload.recipes.length)
+    errors.push("New weekly meal plans must not include recipes; create them separately.");
   errors.push(...validateMealPreferences(db, changes));
-  const changedDates = new Set();
+  const seen = new Set();
   for (const [index, change] of changes.entries()) {
     const at = `mealChanges[${index}]`;
-    if (!dates.includes(change.date)) errors.push(`${at}.date must be inside ${selectedMonth}.`);
-    if (changedDates.has(change.date)) errors.push(`${at}.date is duplicated.`);
-    changedDates.add(change.date);
-    if (!String(change.lunch ?? "").trim()) errors.push(`${at}.lunch is required.`);
-    if (!String(change.main ?? "").trim()) errors.push(`${at}.main is required.`);
-    const mealStyle = mealStyleFor(change);
-    if (!mealStyles.has(mealStyle))
-      errors.push(`${at}.mealStyle must be MAIN_DISH, SOUP_MEAL, NOODLE_DUMPLING, or RICE_PORRIDGE_TTEOK.`);
-    if (mealStyle === "SOUP_MEAL" && !String(change.soup ?? "").trim())
-      errors.push(`${at}.soup is required for SOUP_MEAL.`);
-    if (mealStyle !== "SOUP_MEAL" && String(change.soup ?? "").trim())
-      errors.push(`${at}.soup is only allowed for SOUP_MEAL.`);
-    if (!Array.isArray(change.sides) || change.sides.length !== 2 || change.sides.some((side) => !String(side).trim()))
+    if (!dates.includes(change?.date)) errors.push(`${at}.date must be inside ${week} week.`);
+    if (seen.has(change?.date)) errors.push(`${at}.date is duplicated.`);
+    seen.add(change?.date);
+    if (!String(change?.lunch ?? "").trim()) errors.push(`${at}.lunch is required.`);
+    if (!String(change?.main ?? "").trim()) errors.push(`${at}.main is required.`);
+    const style = mealStyleFor(change);
+    if (!mealStyles.has(style)) errors.push(`${at}.mealStyle is invalid.`);
+    if (style === "SOUP_MEAL" && !String(change?.soup ?? "").trim()) errors.push(`${at}.soup is required for SOUP_MEAL.`);
+    if (style !== "SOUP_MEAL" && String(change?.soup ?? "").trim()) errors.push(`${at}.soup is only allowed for SOUP_MEAL.`);
+    if (!Array.isArray(change?.sides) || change.sides.length !== 2 || change.sides.some((side) => !String(side).trim()))
       errors.push(`${at}.sides must contain exactly two named side dishes.`);
-    if (Array.isArray(change.sides) && new Set(change.sides.map(normalizeName)).size !== change.sides.length)
+    if (Array.isArray(change?.sides) && new Set(change.sides.map(normalizeName)).size !== change.sides.length)
       errors.push(`${at}.sides must not contain duplicates.`);
     for (const item of banned)
       if (JSON.stringify(change).includes(item)) errors.push(`${at} contains banned ingredient: ${item}`);
   }
-  if (changedDates.size !== dates.length)
-    errors.push(`mealChanges must contain every day of ${selectedMonth} exactly once.`);
-  const orderedSideChanges = changes
-    .filter(
-      (change) =>
-        dates.includes(change.date) &&
-        Array.isArray(change.sides) &&
-        change.sides.length === 2,
-    )
-    .sort((a, b) => a.date.localeCompare(b.date));
-  // Repetition and previous-month reuse are allowed. Keep batch length as a
-  // quality warning only; never force novel dishes or a novelty percentage.
-  const batches = [];
-  for (const change of orderedSideChanges) {
-    const signature = change.sides.map(normalizeName).sort().join("|");
-    const last = batches.at(-1);
-    if (last?.signature === signature) last.dates.push(change.date);
-    else batches.push({signature, dates: [change.date]});
-  }
-  for (const batch of batches) if (batch.dates.length > 4)
-    warnings.push(`부찬 조합 '${batch.signature}'이 ${batch.dates.length}일 연속입니다. 보관 기간과 새 조리 여부를 확인해 주세요.`);
-  const existing = db.prepare('SELECT "date" FROM "MealPlan" WHERE "monthKey"=?').all(selectedMonth);
-  if (existing.length && !allowExisting)
-    errors.push(`${selectedMonth} already has ${existing.length} saved meal plans and will not be overwritten.`);
-  let qualityIssues = [];
-  let diversitySummary = null;
-  let qualityScore = null;
-  let qualitySummary = null;
+  if (seen.size !== 7 || dates.some((date) => !seen.has(date)))
+    errors.push("mealChanges must contain every day of the selected week exactly once.");
+  const existing = db.prepare('SELECT COUNT(*) AS "count" FROM "MealPlan" WHERE "date">=? AND "date"<?')
+    .get(toMillis(week), toMillis(addDays(week, 7))).count;
+  if (existing) errors.push(`${week} week already has ${existing} saved meal plans and will not be overwritten.`);
+  let qualityIssues = [], qualityScore = null, qualitySummary = null;
   if (!errors.length) {
     const catalog = loadCatalogItems();
-    const previousPlans = db.prepare(
-      'SELECT "date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
-    ).all(toMillis(addDays(dates[0], -8)), toMillis(dates[0]))
+    const previousPlans = db.prepare('SELECT "date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"')
+      .all(toMillis(addDays(week, -8)), toMillis(week))
       .map((plan) => ({ ...plan, date: formatKst(plan.date), sides: parseJsonList(plan.sideDishes) }));
-    const diversity = assessMealDiversity({
-      plans: changes,
-      previousPlans,
-      catalog,
-      activeFrom: flags["replace-from"] && dates.includes(flags["replace-from"])
-        ? flags["replace-from"] : null,
-    });
-    const targetDates = flags["replace-from"] && dates.includes(flags["replace-from"])
-      ? dates.filter((date) => date >= flags["replace-from"]) : dates;
-    const final = assessFinalMealQuality({
-      plans: changes, catalog, targetDates,
-      knownMenus: confirmedMenuKeys(), verifiedRecipes: verifiedRecipeKeys(),
-      diversityIssues: diversity.issues,
-    });
+    const diversity = assessMealDiversity({ plans: changes, previousPlans, catalog });
+    const final = assessFinalMealQuality({ plans: changes, catalog, knownMenus: confirmedMenuKeys(),
+      verifiedRecipes: verifiedRecipeKeys(), diversityIssues: diversity.issues });
     qualityIssues = [...diversity.issues, ...final.issues];
-    diversitySummary = diversity.summary;
     qualityScore = final.score;
     qualitySummary = final.summary;
     warnings.push(...qualityIssues.map((issue) => issue.message));
   }
-  return { valid: errors.length === 0, month: selectedMonth, errors, warnings, qualityIssues, qualityScore, qualitySummary, diversitySummary, counts: { mealChanges: changes.length } };
+  return { valid: errors.length === 0, weekStart: week, errors, warnings, qualityIssues,
+    qualityScore, qualitySummary, counts: { mealChanges: changes.length } };
 }
 
 function previousMonthKey(month) {
@@ -1048,13 +1046,13 @@ function isCatalogItemAllowed(item) {
       || item.ingredientCategories.some((category) => category.includes(ingredient))
     ));
 }
-function weeklyAvoidForDate(date) {
-  const review = db.prepare('SELECT "referenceDate","weekStart","avoidFoods" FROM "WeeklyReview" WHERE "weekStart"=?')
+function weeklyRequestTerms(date, field) {
+  const review = db.prepare('SELECT "referenceDate","weekStart","avoidFoods","wantedFoods" FROM "WeeklyReview" WHERE "weekStart"=?')
     .get(toMillis(sundayFor(date)));
   return review && toMillis(date) >= Number(review.referenceDate || review.weekStart)
-    ? String(review.avoidFoods || "") : "";
+    ? splitWeeklyFoods(review[field]) : [];
 }
-function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage, pickSides }) {
+function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage, pickSides, existingSides = [] }) {
   const menuWeights = catalogMenuWeights();
   const pick = (
     sourceCategories,
@@ -1066,7 +1064,15 @@ function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage,
     const selectionRole = role.startsWith("side") ? "SIDE"
       : role === "soup" ? "SOUP"
         : sourceCategories.includes("메인반찬") ? "MAIN" : "ONE_BOWL";
-    const weeklyAvoid = weeklyAvoidForDate(date).split(/[,/·\n]/).map((item) => item.trim()).filter(Boolean);
+    const sameDayPork = history.some((entry) => entry.date === date && entry.primaryIngredient === "돼지고기")
+      || existingSides.some((side) => side?.primaryIngredient === "돼지고기");
+    const recentPorkCenterDays = new Set(history.filter((entry) => entry.selectionRole !== "SIDE"
+      && entry.primaryIngredient === "돼지고기"
+      && toMillis(date) - toMillis(entry.date) >= 86_400_000
+      && toMillis(date) - toMillis(entry.date) <= 6 * 86_400_000).map((entry) => entry.date));
+    const preferNonPork = sameDayPork || (selectionRole !== "SIDE" && recentPorkCenterDays.size >= 2);
+    const weeklyAvoid = weeklyRequestTerms(date, "avoidFoods");
+    const weeklyWanted = weeklyRequestTerms(date, "wantedFoods");
     const selected = chooseCatalogMenu({
       catalog: catalog.filter((item) => isCatalogItemAllowed(item)
         && matchesSelectionRole(item, selectionRole)
@@ -1079,14 +1085,14 @@ function selectionForMealStyle({ catalog, history, date, mealStyle, seed, usage,
           const activeUrgentMatches = activeUrgentPantryMatches(pantrySignal, date, history);
           return {
             ...item,
-            selectionBoost: pantrySignal.boost,
+            selectionBoost: pantrySignal.boost * weeklyWishBoost(item, weeklyWanted),
             selectionPriority: activeUrgentMatches.length ? 1 : 0,
             pantryMatches: pantrySignal.matches,
             urgentPantryMatches: pantrySignal.urgentMatches,
             selectionWeight: menuWeights.get(`${item.sourceCategory}|${item.baseName}`) ?? 1,
           };
         }),
-      history, sourceCategories, date, seed: `${seed}:${role}`, forceRelaxVariant,
+      history, sourceCategories, date, seed: `${seed}:${role}`, forceRelaxVariant, preferNonPork,
     });
     if (!selected) return null;
     history.push({ date, variantName: selected.variantName, baseName: selected.baseName, sourceCategory: selected.sourceCategory, selectionRole: selected.selectionRole, cookingFamily: selected.cookingFamily, similarGroup: selected.similarGroup, flavorFamily: selected.flavorFamily, ingredientCategories: selected.ingredientCategories, primaryIngredient: selected.primaryIngredient, urgentPantryMatches: selected.urgentPantryMatches });
@@ -1158,7 +1164,8 @@ function catalogSelectionPreview({ catalog, dates, history, month, usage, styles
   return dates.map((date, index) => {
     const mealStyle = generatedStyles.get(date);
     const selectSides = index % 3 === 0 || !sidePair;
-    const selection = selectionForMealStyle({ catalog, history: evolvingHistory, date, mealStyle, seed: `${month}:${date}:${seedSalt}`, usage, pickSides: selectSides });
+    const selection = selectionForMealStyle({ catalog, history: evolvingHistory, date, mealStyle, seed: `${month}:${date}:${seedSalt}`, usage, pickSides: selectSides,
+      existingSides: selectSides ? [] : sidePair ?? [] });
     if (selectSides) sidePair = selection.sides;
     const withStatus = (item) => item && {
       ...item,
@@ -1168,6 +1175,10 @@ function catalogSelectionPreview({ catalog, dates, history, month, usage, styles
   });
 }
 function generateCatalogDay(date, slot = "all", seedSalt = "") {
+  if (!isRealDate(date))
+    fail("--date must be a real calendar date in YYYY-MM-DD format.");
+  if (!["all", "main", "side-0", "side-1"].includes(slot))
+    fail("--slot must be all, main, side-0, or side-1.");
   const week = sundayFor(date);
   let current = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1181,9 +1192,9 @@ function generateCatalogDay(date, slot = "all", seedSalt = "") {
   if (!selection || !existing) fail(`${date}의 식단 또는 카탈로그 후보를 찾지 못했습니다.`);
   const changedSides = slot.startsWith("side-") ? parseJsonList(existing.sideDishes).map((item, index) => index === Number(slot.slice(5)) ? selection.sides[index]?.name ?? item : item) : null;
   const makeChange = (targetDate, plan) => ({
-    date: targetDate, lunch: plan.lunchPlan, mealStyle: slot.startsWith("side") ? plan.mealStyle : selection.mealStyle,
+    date: targetDate, lunch: plan.lunchPlan, mealStyle: slot === "all" ? selection.mealStyle : plan.mealStyle,
     main: slot.startsWith("side") ? plan.mainDish : selection.main?.name,
-    soup: slot.startsWith("side") ? plan.soupDish : selection.soup?.name ?? null,
+    soup: slot === "all" ? selection.soup?.name ?? null : plan.soupDish,
     sides: slot.startsWith("side-") ? parseJsonList(plan.sideDishes).map((item, index) => index === Number(slot.slice(5)) ? changedSides?.[index] ?? item : item) : slot === "main" ? parseJsonList(plan.sideDishes) : selection.sides.map((item) => item.name),
     note: "카탈로그 세부메뉴 자동 선택",
   });
@@ -1193,35 +1204,42 @@ function generateCatalogDay(date, slot = "all", seedSalt = "") {
     const rows = db.prepare('SELECT "date","lunchPlan","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" ORDER BY "date"').all();
     const at = rows.findIndex((row) => formatKst(row.date) === date);
     const batch = [];
-    for (let index = at; index >= 0 && rows[index].sideDishes === signature; index -= 1) batch.unshift(rows[index]);
-    for (let index = at + 1; index < rows.length && rows[index].sideDishes === signature; index += 1) batch.push(rows[index]);
+    for (let index = at; index >= 0 && rows[index].sideDishes === signature
+      && sundayFor(formatKst(rows[index].date)) === week
+      && (index === at || formatKst(rows[index].date) === addDays(formatKst(rows[index + 1].date), -1)); index -= 1) batch.unshift(rows[index]);
+    for (let index = at + 1; index < rows.length && rows[index].sideDishes === signature
+      && sundayFor(formatKst(rows[index].date)) === week
+      && formatKst(rows[index].date) === addDays(formatKst(rows[index - 1].date), 1); index += 1) batch.push(rows[index]);
     changes = batch.map((plan) => makeChange(formatKst(plan.date), plan));
   }
-  return { schemaVersion: "meal-week.v1", weekStart: week, changeReason: "카탈로그 선택기로 식단을 다시 골랐습니다.", recipes: [], mealChanges: changes };
+  return { schemaVersion: "meal-week.v1", weekStart: week, selectionRevision: current.selectionRevision,
+    changeReason: "카탈로그 선택기로 식단을 다시 골랐습니다.", recipes: [], mealChanges: changes };
 }
-function generateCatalogMonth(month, seedSalt = "") {
+function generateCatalogWeek(weekStart, seedSalt = "") {
+  const week = requireWeek(weekStart);
   let current = null;
-  // A high quality warning triggers one automatic reselection pass. Keep the
-  // better result if the warning cannot be removed with available candidates.
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const candidate = loadMonthContext(month, `${seedSalt}:${attempt}`);
+    const candidate = loadContext(week, `${seedSalt}:${attempt}`);
     if (!current || (candidate.menuCatalog.selectionPreviewQuality?.warnings?.length ?? Infinity)
       < (current.menuCatalog.selectionPreviewQuality?.warnings?.length ?? Infinity)) current = candidate;
     if (!(candidate.menuCatalog.selectionPreviewQuality?.warnings?.length)) break;
   }
   if (!current.menuCatalog.available) fail(current.menuCatalog.reason || "카탈로그를 읽지 못했습니다.");
   const catalogItems = loadCatalogItems();
-  const lunchHistory = catalogHistory(catalogItems, current.recentMonths);
+  const recentMeals = db.prepare('SELECT "date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"')
+    .all(toMillis(addDays(week, -30)), toMillis(week));
+  const lunchHistory = catalogHistory(catalogItems, recentMeals);
   const usage = catalogUsage();
   return {
-    schemaVersion: "meal-month.v1", month,
-    changeReason: "카탈로그 선택기로 월간 식단을 구성했습니다.",
-    mealChanges: current.menuCatalog.selectionPreview.map((selection) => {
-      const lunch = catalogLunchForDate(selection.date, current, catalogItems, lunchHistory, usage, seedSalt);
-      return { date: selection.date, lunch,
-        mealStyle: selection.mealStyle, main: selection.main?.name, soup: selection.soup?.name ?? null,
-        sides: selection.sides.map((item) => item.name), note: "카탈로그 세부메뉴 자동 선택" };
-    }), recipes: [],
+    schemaVersion: "meal-week.v1", weekStart: week, selectionRevision: current.selectionRevision,
+    changeReason: "카탈로그 선택기로 주간 식단을 구성했습니다.",
+    mealChanges: current.menuCatalog.selectionPreview.map((selection) => ({
+      date: selection.date,
+      lunch: catalogLunchForDate(selection.date, current, catalogItems, lunchHistory, usage, seedSalt),
+      mealStyle: selection.mealStyle, main: selection.main?.name, soup: selection.soup?.name ?? null,
+      sides: selection.sides.map((item) => item.name), note: "카탈로그 세부메뉴 자동 선택",
+    })),
+    recipes: [],
   };
 }
 function catalogLunchForDate(date, current, catalog, history, usage, seedSalt) {
@@ -1235,7 +1253,8 @@ function catalogLunchForDate(date, current, catalog, history, usage, seedSalt) {
   } else if (daySchedules.length && daySchedules.every((item) => item.isAway || item.lunchNotAtHome)) {
     return "외식";
   }
-  const weeklyAvoid = weeklyAvoidForDate(date).split(/[,/·\n]/).map((item) => item.trim()).filter(Boolean);
+  const weeklyAvoid = weeklyRequestTerms(date, "avoidFoods");
+  const weeklyWanted = weeklyRequestTerms(date, "wantedFoods");
   const menuWeights = catalogMenuWeights();
   const selected = chooseCatalogMenu({
     catalog: catalog.filter((item) => isCatalogItemAllowed(item)
@@ -1246,7 +1265,7 @@ function catalogLunchForDate(date, current, catalog, history, usage, seedSalt) {
         const activeUrgentMatches = activeUrgentPantryMatches(pantrySignal, date, history);
         return {
           ...item,
-          selectionBoost: pantrySignal.boost,
+          selectionBoost: pantrySignal.boost * weeklyWishBoost(item, weeklyWanted),
           selectionPriority: activeUrgentMatches.length ? 1 : 0,
           pantryMatches: pantrySignal.matches,
           urgentPantryMatches: pantrySignal.urgentMatches,
@@ -1506,6 +1525,36 @@ function storedRecipes(weekStart, { skipInvalid = false } = {}) {
   );
 }
 
+function reconcileRecipesForDate(date, change, now, replacementTitles = []) {
+  const retained = new Set([
+    change.main,
+    change.soup,
+    change.lunch,
+    ...(Array.isArray(change.sides) ? change.sides : []),
+  ].filter(Boolean).map(normalizeName));
+  const replacements = new Set(replacementTitles.map(normalizeName));
+  const recipes = db.prepare(
+    'SELECT "id","title","plannedDates" FROM "Recipe" WHERE "plannedDates" LIKE ?',
+  ).all(`%"${date}"%`);
+  const unlink = db.prepare('UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=? AND "date"=?');
+  const trim = db.prepare('UPDATE "Recipe" SET "plannedDates"=?,"weekKeys"=?,"updatedAt"=? WHERE "id"=?');
+  const remove = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
+  for (const recipe of recipes) {
+    const dates = parseJsonList(recipe.plannedDates);
+    if (!dates.includes(date)) continue;
+    const title = normalizeName(recipe.title);
+    if (retained.has(title) && !replacements.has(title)) continue;
+    const remaining = dates.filter((value) => value !== date);
+    unlink.run(recipe.id, toMillis(date));
+    if (remaining.length) {
+      trim.run(JSON.stringify(remaining), JSON.stringify([...new Set(remaining.map(sundayFor))]), now, recipe.id);
+    } else {
+      db.prepare('UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=?').run(recipe.id);
+      remove.run(recipe.id);
+    }
+  }
+}
+
 function missingStoredCoverage(weekStart) {
   const plans = db.prepare('SELECT * FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"').all(toMillis(weekStart), toMillis(addDays(weekStart, 7)));
   const recipes = db.prepare('SELECT * FROM "Recipe" WHERE "weekKeys" LIKE ?').all(`%${weekStart}%`).map(recipe => ({...recipe, ingredients: db.prepare('SELECT "amount" FROM "Ingredient" WHERE "recipeId"=?').all(recipe.id)}));
@@ -1619,17 +1668,8 @@ function failQueuedAgentJob(requestId, error) {
   ).run(String(error).slice(0, 2000), Date.now(), requestId);
 }
 
-function publishMonth(payload, month, requestId = null) {
-  const selectedMonth = requireMonth(month);
-  const replaceExisting = flags.replace === "true";
-  const replaceFrom = flags["replace-from"] || null;
-  if (
-    replaceFrom &&
-    (!replaceExisting ||
-      !monthDates(selectedMonth).includes(replaceFrom))
-  )
-    throw new Error("--replace-from must be a date inside --month and requires --replace true.");
-  const validation = validateMonth(payload, selectedMonth, replaceExisting);
+function publishNewWeek(payload, weekStart, requestId = null) {
+  const validation = validateNewWeek(payload, weekStart);
   if (!validation.valid) {
     failQueuedAgentJob(requestId, validation.errors.join("; "));
     printJson(validation);
@@ -1637,109 +1677,39 @@ function publishMonth(payload, month, requestId = null) {
     return;
   }
   const now = Date.now();
-  const jobId = beginAgentJob({
-    prefix: "agent-month",
-    requestId,
-    weekStart: sundayFor(monthStart(selectedMonth)),
-    action: "PUBLISH_MONTH",
-    inputPath: path.resolve(flags.input),
-    now,
-  });
-  const backupDir = path.join(root, "data", "backups");
-  fs.mkdirSync(backupDir, { recursive: true });
-  const backupPath = path.join(backupDir, `mealplan-${new Date().toISOString().replace(/[:.]/g, "-")}.db`);
-  fs.copyFileSync(dbPath, backupPath);
+  const jobId = beginAgentJob({ prefix: "agent-week", requestId, weekStart,
+    action: "PUBLISH_WEEK", inputPath: path.resolve(flags.input), now });
+  const backupPath = backupDatabase("before-new-week");
   try {
     db.exec("BEGIN IMMEDIATE");
-    const existingCount = db
-      .prepare('SELECT COUNT(*) AS "count" FROM "MealPlan" WHERE "monthKey"=?')
-      .get(selectedMonth).count;
-    if (existingCount && !replaceExisting)
-      throw new Error(`${selectedMonth} 월간 식단이 이미 있어 덮어쓰지 않았습니다.`);
-    const affectedDates = monthDates(selectedMonth).filter(
-      (date) => !replaceFrom || date >= replaceFrom,
-    );
-    const affectedDateSet = new Set(affectedDates);
-    if (replaceExisting) {
-      const affectedWeeks = new Set(affectedDates.map(sundayFor));
-      const affectedRecipes = db
-        .prepare('SELECT "id","plannedDates" FROM "Recipe" WHERE "plannedDates" LIKE ?')
-        .all(`%${selectedMonth}-%`);
-      const unlinkRecipe = db.prepare(
-        'UPDATE "MealPlan" SET "recipeId"=NULL,"updatedAt"=? WHERE "recipeId"=? AND "date">=? AND "date"<?',
-      );
-      const trimRecipe = db.prepare(
-        'UPDATE "Recipe" SET "plannedDates"=?,"weekKeys"=?,"updatedAt"=? WHERE "id"=?',
-      );
-      const deleteRecipe = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
-      for (const recipe of affectedRecipes) {
-        const remainingDates = parseJsonList(recipe.plannedDates).filter(
-          (date) => !affectedDateSet.has(String(date)),
-        );
-        unlinkRecipe.run(
-          now,
-          recipe.id,
-          toMillis(affectedDates[0]),
-          toMillis(addDays(affectedDates.at(-1), 1)),
-        );
-        if (!remainingDates.length) deleteRecipe.run(recipe.id);
-        else
-          trimRecipe.run(
-            JSON.stringify(remainingDates),
-            JSON.stringify([...new Set(remainingDates.map(sundayFor))].sort()),
-            now,
-            recipe.id,
-          );
-      }
-      db.prepare(
-        'DELETE FROM "MealPlan" WHERE "monthKey"=? AND "date">=?',
-      ).run(selectedMonth, toMillis(affectedDates[0]));
-      const findShoppingWeek = db.prepare(
-        'SELECT "id" FROM "ShoppingWeek" WHERE "startDate"=?',
-      );
-      const clearGeneratedShopping = db.prepare(
-        'DELETE FROM "ShoppingItem" WHERE "weekId"=? AND "usePlan"<>?',
-      );
-      for (const weekStart of affectedWeeks) {
-        const shoppingWeek = findShoppingWeek.get(toMillis(weekStart));
-        if (shoppingWeek)
-          clearGeneratedShopping.run(shoppingWeek.id, "직접 추가");
-      }
-    }
-    const insertPlan = db.prepare('INSERT INTO "MealPlan" ("id","date","monthKey","mealType","lunchPlan","mainDish","soupDish","mealStyle","sideDishes","babyMenu","cookingNote","changeReason","adultServings","childServings","dinnerDiningOut","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
-    const changesToPublish = payload.mealChanges.filter((change) =>
-      affectedDateSet.has(String(change.date)),
-    );
-    for (const change of changesToPublish) {
-      const date = String(change.date);
-      insertPlan.run(
-        `month-${date}-${crypto.randomBytes(3).toString("hex")}`,
-        toMillis(date),
-        selectedMonth,
-        "DINNER",
-        String(change.lunch).trim(),
-        String(change.main).trim(),
-        mealStyleFor(change) === "SOUP_MEAL" ? String(change.soup).trim() : null,
-        mealStyleFor(change),
-        JSON.stringify(change.sides.map((side) => String(side).trim())),
-        String(change.baby ?? "").trim() || null,
-        String(change.note ?? "").trim() || null,
-        String(payload.changeReason).trim().slice(0, 2_000),
-        2,
-        1,
-        0,
-        now,
-        now,
-      );
+    if (payload.selectionRevision && payload.selectionRevision !== selectionRevision(weekStart))
+      throw new Error("식단 생성 중 점검 설정·보유 재료·가족 일정이 변경되었습니다. 다시 생성해 주세요.");
+    const existing = db.prepare('SELECT COUNT(*) AS "count" FROM "MealPlan" WHERE "date">=? AND "date"<?')
+      .get(toMillis(weekStart), toMillis(addDays(weekStart, 7))).count;
+    if (existing) throw new Error(`${weekStart} 주차에는 이미 ${existing}일의 식단이 있어 덮어쓰지 않았습니다.`);
+    const insert = db.prepare('INSERT INTO "MealPlan" ("id","date","monthKey","mealType","lunchPlan","mainDish","soupDish","mealStyle","sideDishes","babyMenu","cookingNote","changeReason","adultServings","childServings","dinnerDiningOut","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    for (const change of payload.mealChanges) {
+      const style = mealStyleFor(change);
+      insert.run(`week-${change.date}-${crypto.randomBytes(3).toString("hex")}`,
+        toMillis(change.date), change.date.slice(0, 7), "DINNER", String(change.lunch).trim(),
+        String(change.main).trim(), style === "SOUP_MEAL" ? String(change.soup).trim() : null,
+        style, JSON.stringify(change.sides.map((side) => String(side).trim())), null,
+        String(change.note ?? "").trim() || null, String(payload.changeReason).trim().slice(0, 2000),
+        2, 1, 0, now, now);
     }
     syncDishLastPlannedAt();
-    const summary = JSON.stringify({ mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, month: selectedMonth, replaced: Boolean(existingCount), replaceFrom, warnings: validation.warnings, qualityScore: validation.qualityScore, qualitySummary: validation.qualitySummary });
-    db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?').run("COMPLETED", summary, Date.now(), jobId);
+    const summary = JSON.stringify({ mealChanges: 7, recipes: 0, shoppingItems: 0,
+      backup: backupPath, warnings: validation.warnings, qualityScore: validation.qualityScore,
+      qualitySummary: validation.qualitySummary });
+    db.prepare('UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?')
+      .run("COMPLETED", summary, Date.now(), jobId);
     db.exec("COMMIT");
-    printJson({ success: true, jobId, month: selectedMonth, mealChanges: changesToPublish.length, recipes: 0, shoppingItems: 0, backup: backupPath, replaced: Boolean(existingCount), replaceFrom, warnings: validation.warnings, qualityScore: validation.qualityScore, qualitySummary: validation.qualitySummary });
+    printJson({ success: true, weekStart, mealChanges: 7, recipes: 0, shoppingItems: 0,
+      backup: backupPath, warnings: validation.warnings, qualityScore: validation.qualityScore });
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}
-    db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?').run("FAILED", String(error.message ?? error), Date.now(), jobId);
+    db.prepare('UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?')
+      .run("FAILED", String(error.message ?? error), Date.now(), jobId);
     throw error;
   }
 }
@@ -1781,6 +1751,7 @@ function publishWeek(
   const prefix = `generated-${weekStart}-`;
   try {
     db.exec("BEGIN IMMEDIATE");
+    assertExpectedRevisions(payload, Array.from({ length: 7 }, (_, index) => addDays(weekStart, index)));
     const findPlan = db.prepare(
       'SELECT "id","lunchPlan","mainDish","soupDish","mealStyle","sideDishes","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?',
     );
@@ -1808,15 +1779,18 @@ function publishWeek(
         current.id,
       );
     }
-    // A weekly regeneration is an authoritative replacement for that week.
-    // Older data did not always use the generated ID prefix, so scope cleanup by
-    // the persisted week key rather than leaving stale recipes visible.
-    db.prepare(
-      'UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId" IN (SELECT "id" FROM "Recipe" WHERE "weekKeys" LIKE ?)',
-    ).run(`%${weekStart}%`);
-    db.prepare('DELETE FROM "Recipe" WHERE "weekKeys" LIKE ?').run(
-      `%${weekStart}%`,
-    );
+    // Recipes can span weeks. Replace only the dates covered by this publication.
+    for (let offset = 0; offset < 7; offset += 1) {
+      const date = addDays(weekStart, offset);
+      const plan = findPlan.get(toMillis(date));
+      const change = (payload.mealChanges ?? []).find((item) => item.date === date);
+      const replacementTitles = payload.recipes
+        .filter((recipe) => recipe.plannedDates.includes(date)).map((recipe) => recipe.title);
+      reconcileRecipesForDate(date, change ?? {
+        main: plan.mainDish, soup: plan.soupDish, lunch: plan.lunchPlan,
+        sides: parseJsonList(plan.sideDishes),
+      }, now, replacementTitles);
+    }
     const insertRecipe = db.prepare(
       `INSERT INTO "Recipe" ("id","title","description","prepMinutes","cookMinutes","adultServings","childServings","tags","category","plannedDates","weekKeys","instructions","babySplitStep","storageMethod","consumeWithin","sourceUrl","sourceTitle","sourceAuthor","sourceDomain","sourceCheckedAt","needsReview","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     );
@@ -1825,7 +1799,7 @@ function publishWeek(
     );
     const recipeIds = new Map();
     for (const recipe of payload.recipes) {
-      const id = `${prefix}${crypto.createHash("sha1").update(`${recipe.category}|${recipe.title}`).digest("hex").slice(0, 12)}`;
+      const id = `${prefix}${crypto.createHash("sha1").update(`${recipe.category}|${recipe.title}`).digest("hex").slice(0, 12)}-${crypto.randomBytes(3).toString("hex")}`;
       recipeIds.set(recipe.title, id);
       const sourceDomain = recipe.sourceUrl
         ? new URL(recipe.sourceUrl).hostname.toLowerCase()
@@ -1944,14 +1918,17 @@ function publishDay(payload, weekStart, date, requestId = null) {
   fs.copyFileSync(dbPath, backupPath);
   try {
     db.exec("BEGIN IMMEDIATE");
+    if (payload.selectionRevision && payload.selectionRevision !== selectionRevision(weekStart))
+      throw new Error("식단 생성 중 점검 설정·보유 재료·가족 일정이 변경되었습니다. 다시 생성해 주세요.");
+    assertExpectedRevisions(payload, [date]);
     const change = payload.mealChanges[0];
     const current = db
       .prepare(
-        'SELECT "id","lunchPlan","soupDish","mealStyle","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?',
+        'SELECT "id","lunchPlan","mainDish","soupDish","mealStyle","babyMenu","cookingNote","recipeId" FROM "MealPlan" WHERE "date"=?',
       )
       .get(toMillis(date));
     db.prepare(
-      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"soupDish"=?,"mealStyle"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=NULL,"updatedAt"=? WHERE "id"=?',
+      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"soupDish"=?,"mealStyle"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=?,"updatedAt"=? WHERE "id"=?',
     ).run(
       Object.hasOwn(change, "lunch")
         ? (change.lunch ?? null)
@@ -1965,30 +1942,11 @@ function publishDay(payload, weekStart, date, requestId = null) {
         ? (change.note ?? null)
         : current.cookingNote,
       payload.changeReason,
+      current.mainDish === change.main ? current.recipeId : null,
       now,
       current.id,
     );
-
-    const oldRecipes = db
-      .prepare(
-        'SELECT "id","plannedDates" FROM "Recipe" WHERE "weekKeys" LIKE ? AND "plannedDates" LIKE ?',
-      )
-      .all(`%${weekStart}%`, `%"${date}"%`);
-    const unlink = db.prepare(
-      'UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=? AND "date"=?',
-    );
-    const trimDates = db.prepare(
-      'UPDATE "Recipe" SET "plannedDates"=?,"updatedAt"=? WHERE "id"=?',
-    );
-    const deleteRecipe = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
-    for (const recipe of oldRecipes) {
-      const dates = parseJsonList(recipe.plannedDates).filter(
-        (value) => value !== date,
-      );
-      unlink.run(recipe.id, toMillis(date));
-      if (dates.length) trimDates.run(JSON.stringify(dates), now, recipe.id);
-      else deleteRecipe.run(recipe.id);
-    }
+    reconcileRecipesForDate(date, change, now, payload.recipes.map((recipe) => recipe.title));
     const recipeIds = insertRecipes(
       payload.recipes,
       weekStart,
@@ -2008,6 +1966,7 @@ function publishDay(payload, weekStart, date, requestId = null) {
       storedRecipes(weekStart, { skipInvalid: true }),
       now,
     );
+    const missing = missingStoredCoverage(weekStart);
     syncDishLastPlannedAt();
     const summary = JSON.stringify({
       mealChanges: 1,
@@ -2017,6 +1976,8 @@ function publishDay(payload, weekStart, date, requestId = null) {
       qualityScore: validation.qualityScore,
       qualitySummary: validation.qualitySummary,
       skippedLegacyRecipes,
+      shoppingComplete: missing.length === 0,
+      missing,
       backup: backupPath,
     });
     db.prepare(
@@ -2036,6 +1997,8 @@ function publishDay(payload, weekStart, date, requestId = null) {
       qualityScore: validation.qualityScore,
       qualitySummary: validation.qualitySummary,
       skippedLegacyRecipes,
+      shoppingComplete: missing.length === 0,
+      missing,
     });
   } catch (error) {
     try {
@@ -2113,6 +2076,51 @@ function backupDatabase(label) {
   );
   fs.copyFileSync(dbPath, backupPath);
   return backupPath;
+}
+
+function pruneFutureMeals(fromDate) {
+  const parsed = new Date(`${fromDate}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fromDate)) || Number.isNaN(parsed.valueOf())
+    || parsed.toISOString().slice(0, 10) !== fromDate)
+    fail("--from must be a valid YYYY-MM-DD date.");
+  if (flags.confirm !== "true") fail("--confirm true is required to delete future meal plans.");
+  if (fromDate < formatKst(Date.now())) fail("--from is in the past; historical meals will not be deleted.");
+  if (db.prepare('PRAGMA quick_check').get()?.quick_check !== "ok") fail("Database integrity check failed; future meals were not deleted.");
+  const start = toMillis(fromDate);
+  const rows = db.prepare('SELECT "date" FROM "MealPlan" WHERE "date">=? ORDER BY "date"').all(start);
+  if (!rows.length) return printJson({ success: true, fromDate, deletedMeals: 0, backup: null });
+  const backupPath = backupDatabase("before-prune-future");
+  const affectedWeeks = new Set(rows.map((row) => sundayFor(formatKst(row.date))));
+  let changedRecipes = 0, removedShoppingItems = 0;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const recipes = db.prepare('SELECT "id","plannedDates" FROM "Recipe"').all();
+    const updateRecipe = db.prepare('UPDATE "Recipe" SET "plannedDates"=?,"weekKeys"=?,"updatedAt"=? WHERE "id"=?');
+    const unlinkRecipe = db.prepare('UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=?');
+    const deleteRecipe = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
+    for (const recipe of recipes) {
+      const planned = parseJsonList(recipe.plannedDates);
+      const kept = planned.filter((date) => date < fromDate);
+      if (kept.length === planned.length) continue;
+      changedRecipes += 1;
+      if (kept.length) updateRecipe.run(JSON.stringify(kept), JSON.stringify([...new Set(kept.map(sundayFor))].sort()), Date.now(), recipe.id);
+      else { unlinkRecipe.run(recipe.id); deleteRecipe.run(recipe.id); }
+    }
+    db.prepare('DELETE FROM "MealPlan" WHERE "date">=?').run(start);
+    const shoppingWeek = db.prepare('SELECT "id" FROM "ShoppingWeek" WHERE "startDate"=?');
+    const clearAutomatic = db.prepare('DELETE FROM "ShoppingItem" WHERE "weekId"=? AND "usePlan"<>? AND "purchased"=0');
+    for (const week of affectedWeeks) {
+      const record = shoppingWeek.get(toMillis(week));
+      if (record) removedShoppingItems += clearAutomatic.run(record.id, "직접 추가").changes;
+    }
+    syncDishLastPlannedAt();
+    db.exec("COMMIT");
+    printJson({ success: true, fromDate, deletedMeals: rows.length, changedRecipes,
+      removedShoppingItems, backup: backupPath });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
 }
 
 function deleteRecipeForChat(weekStart, title, category = null, date = null, deleteAll = false) {
@@ -2284,7 +2292,7 @@ function publishDays(payload) {
   const byWeek = new Map();
   for (const change of changes) {
     const date = String(change?.date ?? "");
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    if (!isRealDate(date)) {
       errors.push(`올바르지 않은 날짜: ${date || "(비어 있음)"}`);
       continue;
     }
@@ -2341,22 +2349,15 @@ function publishDays(payload) {
   const affectedWeeks = [...new Set(dates.map(sundayFor))];
   try {
     db.exec("BEGIN IMMEDIATE");
+    if (payload.selectionRevision && (affectedWeeks.length !== 1 || payload.selectionRevision !== selectionRevision(affectedWeeks[0])))
+      throw new Error("식단 생성 중 점검 설정·보유 재료·가족 일정이 변경되었습니다. 다시 생성해 주세요.");
+    assertExpectedRevisions(payload, dates);
     const findPlan = db.prepare(
-      'SELECT "id","lunchPlan","soupDish","mealStyle","babyMenu","cookingNote" FROM "MealPlan" WHERE "date"=?',
+      'SELECT "id","lunchPlan","mainDish","soupDish","mealStyle","babyMenu","cookingNote","recipeId" FROM "MealPlan" WHERE "date"=?',
     );
     const updatePlan = db.prepare(
-      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"soupDish"=?,"mealStyle"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=NULL,"updatedAt"=? WHERE "id"=?',
+      'UPDATE "MealPlan" SET "lunchPlan"=?,"mainDish"=?,"soupDish"=?,"mealStyle"=?,"sideDishes"=?,"babyMenu"=?,"cookingNote"=?,"changeReason"=?,"recipeId"=?,"updatedAt"=? WHERE "id"=?',
     );
-    const findRecipes = db.prepare(
-      'SELECT "id","plannedDates" FROM "Recipe" WHERE "weekKeys" LIKE ? AND "plannedDates" LIKE ?',
-    );
-    const unlink = db.prepare(
-      'UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=? AND "date"=?',
-    );
-    const trimDates = db.prepare(
-      'UPDATE "Recipe" SET "plannedDates"=?,"updatedAt"=? WHERE "id"=?',
-    );
-    const deleteRecipe = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
     for (const change of changes) {
       const date = String(change.date);
       const current = findPlan.get(toMillis(date));
@@ -2370,23 +2371,20 @@ function publishDays(payload) {
         Object.hasOwn(change, "baby") ? (change.baby ?? null) : current.babyMenu,
         Object.hasOwn(change, "note") ? (change.note ?? null) : current.cookingNote,
         String(payload.changeReason || "AI 채팅에서 식단을 변경했습니다.").slice(0, 2000),
+        current.mainDish === change.main ? current.recipeId : null,
         now,
         current.id,
       );
-      const weekStart = sundayFor(date);
-      for (const recipe of findRecipes.all(`%${weekStart}%`, `%"${date}"%`)) {
-        const plannedDates = parseJsonList(recipe.plannedDates).filter((value) => value !== date);
-        unlink.run(recipe.id, toMillis(date));
-        if (plannedDates.length) trimDates.run(JSON.stringify(plannedDates), now, recipe.id);
-        else deleteRecipe.run(recipe.id);
-      }
+      reconcileRecipesForDate(date, change, now);
     }
     for (const weekStart of affectedWeeks)
       writeShopping(weekStart, storedRecipes(weekStart, { skipInvalid: true }), now);
+    const missingByWeek = Object.fromEntries(affectedWeeks.map((weekStart) => [weekStart, missingStoredCoverage(weekStart)]));
+    const shoppingComplete = Object.values(missingByWeek).every((missing) => missing.length === 0);
     syncDishLastPlannedAt();
     db.exec("COMMIT");
     printJson({ success: true, mealChanges: changes.length, affectedWeeks, backup: backupPath,
-      warnings: [...new Set(warnings)], qualityScores, overallQuality });
+      warnings: [...new Set(warnings)], qualityScores, overallQuality, shoppingComplete, missingByWeek });
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}
     throw error;
@@ -2648,7 +2646,7 @@ function replyChat(payload, id) {
   printJson({ success: true, id, sources: sources.length });
 }
 
-function recordReview(weekStart, summary, requestId = null) {
+function recordReview(weekStart, summary, requestId = null, changed = false) {
   if (!String(summary ?? "").trim()) fail("--summary is required.");
   const now = Date.now();
   const jobId = beginAgentJob({
@@ -2661,13 +2659,13 @@ function recordReview(weekStart, summary, requestId = null) {
   db.prepare(
     'UPDATE "AgentJob" SET "action"=?,"status"=?,"summary"=?,"error"=NULL,"completedAt"=? WHERE "id"=?',
   ).run(
-    "WEEKLY_REVIEW_MAINTAINED",
+    changed ? "REVIEW_WEEK" : "WEEKLY_REVIEW_MAINTAINED",
     "COMPLETED",
     String(summary).trim().slice(0, 2000),
     now,
     jobId,
   );
-  printJson({ success: true, jobId, weekStart, maintained: true });
+  printJson({ success: true, jobId, weekStart, maintained: !changed });
 }
 
 function failJob(requestId, error) {
@@ -2747,24 +2745,21 @@ fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Auth
 try {
   if (command === "context") printJson(loadContext(requireWeek(flags.week)));
   if (command === "context-month") printJson(loadMonthContext(requireMonth(flags.month)));
-  if (command === "generate-catalog-month") printJson(generateCatalogMonth(requireMonth(flags.month), flags.salt));
+  if (command === "generate-catalog-week") printJson(generateCatalogWeek(requireWeek(flags.week), flags.salt));
   if (command === "generate-catalog-day") printJson(generateCatalogDay(flags.date, flags.slot, flags.salt));
+  if (command === "validate-new-week") {
+    const result = validateNewWeek(readPayload(flags.input), requireWeek(flags.week));
+    printJson(result);
+    if (!result.valid) process.exitCode = 2;
+  }
+  if (command === "publish-new-week") publishNewWeek(readPayload(flags.input), requireWeek(flags.week), flags["request-id"]);
+  if (command === "prune-future-meals") pruneFutureMeals(flags.from);
   if (command === "refresh-dish-history") refreshDishHistory();
   if (command === "validate-week") {
     const payload = readPayload(flags.input);
     const result = validatePayload(
       payload,
       requireWeek(flags.week ?? payload.weekStart),
-    );
-    printJson(result);
-    if (!result.valid) process.exitCode = 2;
-  }
-  if (command === "validate-month") {
-    const payload = readPayload(flags.input);
-    const result = validateMonth(
-      payload,
-      requireMonth(flags.month ?? payload.month),
-      flags.replace === "true",
     );
     printJson(result);
     if (!result.valid) process.exitCode = 2;
@@ -2776,8 +2771,6 @@ try {
       true,
       flags["request-id"],
     );
-  if (command === "publish-month")
-    publishMonth(readPayload(flags.input), requireMonth(flags.month), flags["request-id"]);
   if (command === "publish-recipes")
     publishWeek(
       readPayload(flags.input),
@@ -2830,7 +2823,7 @@ try {
     updateAttendanceForChat(readPayload(flags.input), flags.date);
   if (command === "reply-chat") replyChat(readPayload(flags.input), flags.id);
   if (command === "record-review")
-    recordReview(requireWeek(flags.week), flags.summary, flags["request-id"]);
+    recordReview(requireWeek(flags.week), flags.summary, flags["request-id"], flags.changed === "true");
   if (command === "fail-job") failJob(flags["request-id"], flags.error);
   if (command === "fail-chat") failChat(flags.id, flags.error);
   if (command === "notify-web")

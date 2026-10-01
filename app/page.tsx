@@ -142,7 +142,7 @@ type PendingAgentJob = {
 };
 type PendingAgentChat = { id: string };
 const nav = [
-  [CalendarDays, "이 달의 식단"],
+  [CalendarDays, "주간 식단"],
   [BookOpen, "레시피"],
   [ShoppingBasket, "장보기"],
   [UtensilsCrossed, "우리 집 메뉴"],
@@ -153,9 +153,8 @@ const seedRecipes: Recipe[] = [];
 const seedGrocery: Grocery[] = [];
 
 export default function Home() {
-  const [view, setView] = useState<"month" | "week">("month");
   const [active, setActive] = useState<(typeof nav)[number][1] | "주간 점검">(
-    "이 달의 식단",
+    "주간 식단",
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -171,13 +170,9 @@ export default function Home() {
   const [recipes, setRecipes] = useState(seedRecipes);
   const [grocery, setGrocery] = useState(seedGrocery);
   const [groceryMissingRecipes, setGroceryMissingRecipes] = useState<string[]>([]);
-  const [selectedMonth, setSelectedMonth] = useState(() =>
-    currentKstDate().slice(0, 7),
-  );
   const [selectedWeek, setSelectedWeek] = useState(() =>
     sundayFor(currentKstDate()),
   );
-  const [todayScrollRequest, setTodayScrollRequest] = useState(0);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [pendingJobs, setPendingJobs] = useState<PendingAgentJob[]>([]);
   const [pendingChats, setPendingChats] = useState<PendingAgentChat[]>([]);
@@ -186,13 +181,13 @@ export default function Home() {
   const pendingChatsLoaded = useRef(false);
   const currentWeek = sundayFor(currentKstDate());
   const dataWeek =
-    active === "레시피" || (active === "이 달의 식단" && view === "week")
+    active === "레시피"
       ? currentWeek
       : selectedWeek;
 
   useEffect(() => {
     const load = () =>
-      fetch(`/api/meal-data?month=${selectedMonth}&week=${dataWeek}`)
+      fetch(`/api/meal-data?week=${dataWeek}`)
         .then((response) =>
           response.ok
             ? response.json()
@@ -214,7 +209,7 @@ export default function Home() {
     const onFocus = () => load();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [dataWeek, selectedMonth, refreshVersion]);
+  }, [dataWeek, refreshVersion]);
 
   useEffect(() => {
     try {
@@ -301,10 +296,7 @@ export default function Home() {
   };
   const goToToday = () => {
     const today = currentKstDate();
-    setView("month");
-    setSelectedMonth(today.slice(0, 7));
     setSelectedWeek(sundayFor(today));
-    setTodayScrollRequest((request) => request + 1);
   };
   const editDay = async (date: string, slot: "main" | "side-0" | "side-1" | "all" = "all") => {
     if (!window.confirm(`${date} 식단을 카탈로그 선택기로 다시 고를까요?`)) return;
@@ -314,15 +306,9 @@ export default function Home() {
     setAppNotice(response.ok ? data.message : (data.error ?? "일일 식단 생성에 실패했습니다."));
     if (response.ok) setRefreshVersion((version) => version + 1);
   };
-  const changeMonth = (amount: number) => {
-    const next = shiftMonth(selectedMonth, amount);
-    setSelectedMonth(next);
-    setSelectedWeek(sundayFor(`${next}-01`));
-  };
   const changeWeek = (amount: number) => {
     const next = addDaysLocal(selectedWeek, amount * 7);
     setSelectedWeek(next);
-    setSelectedMonth(addDaysLocal(next, 3).slice(0, 7));
   };
 
   return (
@@ -450,30 +436,19 @@ export default function Home() {
         className={`min-w-0 flex-1 pt-16 transition-[margin] duration-200 lg:pt-0 ${sidebarCollapsed ? "lg:ml-[72px]" : "lg:ml-[252px]"}`}
       >
         <div className="mx-auto max-w-[1440px] p-5 md:p-9">
-          {active === "이 달의 식단" && (
+          {active === "주간 식단" && (
             <MealPlanner
-              view={view}
-              setView={setView}
-              month={selectedMonth}
-              weekStart={currentWeek}
-              onChangeMonth={changeMonth}
+              weekStart={selectedWeek}
+              onChangeWeek={changeWeek}
               onGoToday={goToToday}
-              todayScrollRequest={todayScrollRequest}
               meals={mealItems}
               onOpenDay={openDay}
               onEditDay={editDay}
               onGenerateCatalogWeek={async () => {
-                if (!window.confirm("이번 주 식단을 카탈로그 선택기로 다시 구성할까요?")) return;
-                const response = await fetch("/api/catalog-meal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "week", date: currentKstDate() }) });
+                const hasMeals = mealItems.some((meal) => sundayFor(meal.date) === selectedWeek);
+                if (hasMeals && !window.confirm(`${formatWeekRangeLong(selectedWeek)} 식단을 다시 구성할까요?`)) return;
+                const response = await fetch("/api/catalog-meal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "week", date: selectedWeek, replaceExisting: hasMeals }) });
                 const data = await response.json(); setAppNotice(response.ok ? data.message : (data.error ?? "주간 식단 생성에 실패했습니다.")); if (response.ok) setRefreshVersion((version) => version + 1);
-              }}
-              onGenerateCatalogMonth={async () => {
-                if (mealItems.some((meal) => meal.date.startsWith(selectedMonth)) && !window.confirm(`${selectedMonth} 식단을 카탈로그 선택기로 다시 구성할까요?`)) return;
-                setAppNotice(null);
-                const response = await fetch("/api/catalog-meal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ month: selectedMonth, replace: mealItems.some((meal) => meal.date.startsWith(selectedMonth)) }) });
-                const data = await response.json();
-                setAppNotice(response.ok ? data.message : (data.error ?? "월간 식단 생성에 실패했습니다."));
-                if (response.ok) setRefreshVersion((version) => version + 1);
               }}
             />
           )}
@@ -551,7 +526,7 @@ export default function Home() {
         <ChatModal
           close={() => setChatOpen(false)}
           onQueued={queueAgentChat}
-          targetMonth={selectedMonth}
+          targetMonth={addDaysLocal(selectedWeek, 3).slice(0, 7)}
           weekStart={selectedWeek}
           messages={chatMessages}
           setMessages={setChatMessages}
@@ -819,139 +794,50 @@ function WeekActions({
   );
 }
 function MealPlanner({
-  view,
-  setView,
-  month,
   weekStart,
-  onChangeMonth,
+  onChangeWeek,
   onGoToday,
-  todayScrollRequest,
   meals,
   onOpenDay,
   onEditDay,
-  onGenerateCatalogMonth,
   onGenerateCatalogWeek,
 }: {
-  view: "month" | "week";
-  setView: (v: "month" | "week") => void;
-  month: string;
   weekStart: string;
-  onChangeMonth: (amount: number) => void;
+  onChangeWeek: (amount: number) => void;
   onGoToday: () => void;
-  todayScrollRequest: number;
   meals: Meal[];
   onOpenDay: (date: string) => void;
   onEditDay: (date: string) => void;
-  onGenerateCatalogMonth: () => Promise<void>;
   onGenerateCatalogWeek: () => Promise<void>;
 }) {
   const weekDays = buildWeekDays(weekStart);
-  const periodLabel =
-    view === "month" ? formatMonth(month) : formatWeekRangeLong(weekStart);
+  const hasMeals = meals.some((meal) => sundayFor(meal.date) === weekStart);
   return (
     <>
-      <PageTitle
-        label="식단 플래너"
-        title={view === "month" ? `${month.slice(5)}월의 식단` : "이번 주 식단"}
-      >
-        <div
-          className="flex rounded-lg border border-black/[.08] bg-white p-1"
-          role="group"
-          aria-label="식단 보기 방식"
-        >
-          <button
-            type="button"
-            onClick={() => setView("month")}
-            aria-pressed={view === "month"}
-            className={`rounded-md px-3 py-1.5 text-sm ${view === "month" ? "bg-[#e6f3fe] text-[#0075de]" : "text-black/60"}`}
-          >
-            월간
-          </button>
-          <button
-            type="button"
-            onClick={() => setView("week")}
-            aria-pressed={view === "week"}
-            className={`rounded-md px-3 py-1.5 text-sm ${view === "week" ? "bg-[#e6f3fe] text-[#0075de]" : "text-black/60"}`}
-          >
-            주간
-          </button>
-        </div>
-      </PageTitle>
+      <PageTitle label="식단 플래너" title="주간 식단" />
       <Card className="overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[.08] px-4 py-3 sm:px-5">
           <div className="flex items-center gap-2">
-            {view === "month" && (
-              <button
-                type="button"
-                onClick={() => onChangeMonth(-1)}
-                className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
-                aria-label="이전 달"
-              >
-                <ChevronLeft size={18} />
-              </button>
-            )}
+            <button type="button" onClick={() => onChangeWeek(-1)}
+              className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+              aria-label="이전 주"><ChevronLeft size={18} /></button>
             <h2 className="min-w-[126px] text-center font-semibold tabular-nums sm:min-w-[150px]">
-              {periodLabel}
+              {formatWeekRangeLong(weekStart)}
             </h2>
-            {view === "month" && (
-              <button
-                type="button"
-                onClick={() => onChangeMonth(1)}
-                className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
-                aria-label="다음 달"
-              >
-                <ChevronRight size={18} />
-              </button>
-            )}
+            <button type="button" onClick={() => onChangeWeek(1)}
+              className="grid h-11 w-11 place-items-center rounded-lg hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+              aria-label="다음 주"><ChevronRight size={18} /></button>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            {view === "week" && <Button type="button" onClick={() => void onGenerateCatalogWeek()} className="grid h-11 w-11 place-items-center p-0" aria-label="이번 주 카탈로그로 다시 구성" title="이번 주 카탈로그로 다시 구성"><RefreshCw size={16} aria-hidden="true" /></Button>}
-          {view === "month" && <>
-            <Button type="button" onClick={() => void onGenerateCatalogMonth()} className="grid h-11 w-11 place-items-center p-0" aria-label="이번 달 카탈로그로 다시 구성" title="이번 달 카탈로그로 다시 구성"><RefreshCw size={16} aria-hidden="true" /></Button>
-            <Button type="button" variant="outline" onClick={onGoToday} className="h-11 px-3 lg:hidden">오늘</Button>
-          </>}
+            <Button type="button" variant="outline" onClick={onGoToday} className="h-11 px-3">이번 주</Button>
+            <Button type="button" onClick={() => void onGenerateCatalogWeek()} className="h-11 gap-2 px-3"
+              aria-label={hasMeals ? "선택한 주 식단 다시 구성" : "선택한 주 식단 생성"}>
+              <RefreshCw size={16} aria-hidden="true" />{hasMeals ? "다시 구성" : "식단 생성"}
+            </Button>
           </div>
         </div>
-        {view === "month" ? (
-          <>
-            <div className="lg:hidden">
-              <MobileMealList
-                days={buildMonthDays(month).filter((cell) => cell.current)}
-                meals={meals}
-                onOpenDay={onOpenDay}
-                today={currentKstDate()}
-                todayScrollRequest={todayScrollRequest}
-                autoScrollToToday
-              />
-            </div>
-            <div className="hidden lg:block">
-              <MonthView
-                month={month}
-                meals={meals}
-                onOpenDay={onOpenDay}
-                onEditDay={onEditDay}
-              />
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="lg:hidden">
-              <MobileMealList
-                days={weekDays}
-                meals={meals}
-                onOpenDay={onOpenDay}
-              />
-            </div>
-            <div className="hidden lg:block">
-              <WeekView
-                days={weekDays}
-                meals={meals}
-                onOpenDay={onOpenDay}
-                onEditDay={onEditDay}
-              />
-            </div>
-          </>
-        )}
+        <div className="lg:hidden"><MobileMealList days={weekDays} meals={meals} onOpenDay={onOpenDay} /></div>
+        <div className="hidden lg:block"><WeekView days={weekDays} meals={meals} onOpenDay={onOpenDay} onEditDay={onEditDay} /></div>
       </Card>
     </>
   );
@@ -983,89 +869,16 @@ function MealCard({ meal, onEdit }: {
     </div>
   );
 }
-function MonthView({
-  month,
-  meals,
-  onOpenDay,
-  onEditDay,
-}: {
-  month: string;
-  meals: Meal[];
-  onOpenDay: (date: string) => void;
-  onEditDay: (date: string) => void;
-}) {
-  return (
-    <div className="grid min-w-[728px] grid-cols-7">
-      {["일", "월", "화", "수", "목", "금", "토"].map((x) => (
-        <div
-          className="border-b border-r border-black/[.08] px-3 py-2 text-xs font-medium text-black/55"
-          key={x}
-        >
-          {x}
-        </div>
-      ))}
-      {buildMonthDays(month).map((cell, index) => {
-        const meal = cell.current
-          ? meals.find((item) => item.date === cell.date)
-          : undefined;
-        return (
-          <div
-            className={`calendar-cell ${cell.current ? "" : "bg-black/[.015] text-black/30"}`}
-            key={`${cell.date}-${index}`}
-          >
-            <button
-              type="button"
-              onClick={() => cell.current && onOpenDay(cell.date)}
-              disabled={!cell.current}
-              className="grid h-7 w-7 place-items-center rounded-lg text-xs hover:bg-black/[.04] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
-              aria-label={`${cell.date} 식단 상세 보기`}
-            >
-              {cell.day}
-            </button>
-            {meal && (
-              <MealCard meal={meal} onEdit={() => onEditDay(cell.date)} />
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 function MobileMealList({
   days,
   meals,
   onOpenDay,
-  today,
-  todayScrollRequest = 0,
-  autoScrollToToday = false,
 }: {
-  days: ReturnType<typeof buildMonthDays>;
+  days: ReturnType<typeof buildWeekDays>;
   meals: Meal[];
   onOpenDay: (date: string) => void;
-  today?: string;
-  todayScrollRequest?: number;
-  autoScrollToToday?: boolean;
 }) {
-  const todayRef = useRef<HTMLDivElement>(null);
-  const didAutoScroll = useRef(false);
-  useEffect(() => {
-    if (
-      !autoScrollToToday ||
-      !today ||
-      !todayRef.current ||
-      !window.matchMedia("(max-width: 1023px)").matches
-    )
-      return;
-    if (didAutoScroll.current && todayScrollRequest === 0) return;
-    const frame = window.requestAnimationFrame(() => {
-      todayRef.current?.scrollIntoView({
-        behavior: todayScrollRequest > 0 ? "smooth" : "auto",
-        block: "center",
-      });
-      didAutoScroll.current = true;
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [autoScrollToToday, today, todayScrollRequest]);
+  const today = currentKstDate();
   return (
     <div className="space-y-2 p-3">
       {days.map((cell) => {
@@ -1073,7 +886,6 @@ function MobileMealList({
         return (
           <div
             key={cell.date}
-            ref={cell.date === today ? todayRef : undefined}
             className={`flex w-full items-start gap-3 rounded-xl p-4 text-left ${meal ? meal.color : "bg-[#f6f5f4] text-black/50"}`}
           >
             <span className="flex min-w-11 flex-col items-center text-sm font-medium text-black/60">
@@ -1718,21 +1530,27 @@ function WeeklyReviewSettings({
   >([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [pantryVersion, setPantryVersion] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   useEffect(() => {
     const saved = window.localStorage.getItem("weekly-review-reference-date");
     if (saved && /^\d{4}-\d{2}-\d{2}$/.test(saved)) setReferenceDate(saved);
   }, []);
   useEffect(() => {
+    const controller = new AbortController();
     window.localStorage.setItem("weekly-review-reference-date", referenceDate);
     setLoading(true);
-    fetch(`/api/weekly-review?date=${referenceDate}`)
+    setPantryVersion(null);
+    setMessage("");
+    fetch(`/api/weekly-review?date=${referenceDate}`, { signal: controller.signal })
       .then((response) => (response.ok ? response.json() : Promise.reject()))
       .then((data) => {
+        if (controller.signal.aborted) return;
         const review = data.review;
         setWantedFoods(review?.wantedFoods ?? "");
         setAvoidFoods(review?.avoidFoods ?? "");
         setNote(review?.note ?? "");
+        setPantryVersion(data.pantryVersion ?? null);
         setPantry(
           (data.pantry ?? []).map(
             (item: {
@@ -1751,10 +1569,12 @@ function WeeklyReviewSettings({
           ),
         );
       })
-      .catch(() => setMessage("점검 정보를 불러오지 못했습니다."))
-      .finally(() => setLoading(false));
+      .catch(() => { if (!controller.signal.aborted) setMessage("점검 정보를 불러오지 못했습니다."); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
   }, [referenceDate]);
   const save = async (requestAgent: boolean) => {
+    if (loading || !pantryVersion) { setMessage("보유 재료를 불러온 뒤 저장해 주세요."); return; }
     const weekStart = sundayFor(referenceDate);
     const endDate = addDaysLocal(weekStart, 6);
     setSaving(true);
@@ -1768,6 +1588,7 @@ function WeeklyReviewSettings({
           wantedFoods,
           avoidFoods,
           note,
+          pantryVersion,
           pantry: pantry
             .filter((item) => item.name.trim())
             .map((item) => ({ ...item, quantity: Number(item.quantity) })),
@@ -1775,6 +1596,7 @@ function WeeklyReviewSettings({
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "저장하지 못했습니다.");
+      setPantryVersion(data.pantryVersion ?? null);
       if (requestAgent)
         onRequest({
           weekStart,
@@ -1816,6 +1638,7 @@ function WeeklyReviewSettings({
             <input
               type="date"
               value={referenceDate}
+              disabled={saving}
               onChange={(event) => setReferenceDate(event.target.value)}
               className="h-10 rounded-lg border border-black/[.12] bg-white px-3 text-sm outline-none focus:border-[#0075de]"
             />
@@ -1955,12 +1778,12 @@ function WeeklyReviewSettings({
           <div className="mt-6 flex flex-wrap justify-end gap-2">
             <Button
               variant="outline"
-              disabled={saving}
+              disabled={saving || loading || !pantryVersion}
               onClick={() => void save(false)}
             >
               정보 저장
             </Button>
-            <Button disabled={saving} onClick={() => void save(true)}>
+            <Button disabled={saving || loading || !pantryVersion} onClick={() => void save(true)}>
               <Sparkles size={16} />
               {saving ? "저장 중..." : "저장하고 AI에게 판단 요청"}
             </Button>
@@ -2679,15 +2502,6 @@ function addDaysLocal(date: string, days: number) {
   value.setDate(value.getDate() + days);
   return value.toISOString().slice(0, 10);
 }
-function shiftMonth(month: string, amount: number) {
-  const [year, value] = month.split("-").map(Number);
-  const date = new Date(Date.UTC(year, value - 1 + amount, 1));
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
-}
-function formatMonth(month: string) {
-  const [year, value] = month.split("-");
-  return `${year}년 ${Number(value)}월`;
-}
 function formatWeekRange(weekStart: string) {
   const end = addDaysLocal(weekStart, 6);
   return `${weekStart.slice(5).replace("-", "/")}–${end.slice(5).replace("-", "/")}`;
@@ -2762,22 +2576,6 @@ function weekdayFor(date: string) {
   return ["일", "월", "화", "수", "목", "금", "토"][
     new Date(`${date}T12:00:00+09:00`).getUTCDay()
   ];
-}
-function buildMonthDays(month: string) {
-  const [year, value] = month.split("-").map(Number);
-  const monthIndex = value - 1;
-  const first = new Date(Date.UTC(year, monthIndex, 1));
-  const leading = first.getUTCDay();
-  const count = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
-  const length = Math.ceil((leading + count) / 7) * 7;
-  return Array.from({ length }, (_, index) => {
-    const date = new Date(Date.UTC(year, monthIndex, index - leading + 1));
-    return {
-      date: date.toISOString().slice(0, 10),
-      day: date.getUTCDate(),
-      current: date.getUTCMonth() === monthIndex,
-    };
-  });
 }
 function buildWeekDays(weekStart: string) {
   return Array.from({ length: 7 }, (_, index) => {

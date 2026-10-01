@@ -9,8 +9,10 @@ const catalog = flattenCatalog([
   { sourceCategory: "메인반찬", baseName: "갈치조림", variantName: "무갈치조림" },
   { sourceCategory: "메인반찬", baseName: "두부조림", variantName: "간장두부조림" },
   { sourceCategory: "메인반찬", baseName: "닭갈비", variantName: "춘천닭갈비" },
+  { sourceCategory: "국/탕", baseName: "김치찌개", variantName: "돼지고기김치찌개" },
   { sourceCategory: "밑반찬", baseName: "어묵볶음", variantName: "간장어묵볶음" },
   { sourceCategory: "밑반찬", baseName: "두부조림", variantName: "간장두부조림" },
+  { sourceCategory: "밑반찬", baseName: "감자조림", variantName: "돼지고기감자조림" },
 ]);
 const plans = [
   { date: "2026-09-13", mealStyle: "MAIN_DISH", main: "돼지보쌈", sides: ["간장어묵볶음", "간장두부조림"] },
@@ -53,5 +55,20 @@ const crossingMonth = assessMealDiversity({
 });
 assert.ok(crossingMonth.issues.some((issue) => issue.code === "WEEK_SIMILAR_GROUP"),
   "전월 마지막 4일과 이번 달 첫 3일이 같은 주면 합쳐서 계열 쏠림을 판정한다.");
+
+const porkBalance = assessMealDiversity({ plans: [
+  { date: "2026-10-01", mealStyle: "MAIN_DISH", main: "돼지보쌈", sides: ["간장어묵볶음", "간장두부조림"] },
+  { date: "2026-10-03", mealStyle: "MAIN_DISH", main: "춘천닭갈비", sides: ["간장어묵볶음", "간장두부조림"] },
+  { date: "2026-10-04", mealStyle: "SOUP_MEAL", main: "간장두부조림", soup: "돼지고기김치찌개", sides: ["간장어묵볶음", "간장두부조림"] },
+  { date: "2026-10-07", mealStyle: "MAIN_DISH", main: "돼지수육", sides: ["돼지고기감자조림", "간장어묵볶음"] },
+], catalog });
+assert.ok(porkBalance.issues.some((issue) => issue.code === "ROLLING_WEEK_PORK_SKEW" && issue.dates.includes("2026-10-07")),
+  "주찬과 국을 합친 돼지고기 중심 식사가 최근 7일에 세 번째 나오면 경고한다.");
+assert.ok(porkBalance.issues.some((issue) => issue.code === "SAME_DAY_PORK_SIDE" && issue.dates.includes("2026-10-07")),
+  "돼지고기 중심 식사와 돼지고기 부찬이 같은 날 겹치면 경고한다.");
+const porkFallback = assessMealDiversity({ plans: [{ date: "2026-10-08", mealStyle: "SOUP_MEAL",
+  main: "돼지보쌈", soup: "돼지고기김치찌개", sides: ["간장어묵볶음", "간장두부조림"] }], catalog });
+assert.ok(porkFallback.issues.some((issue) => issue.code === "SAME_DAY_PORK_MAIN_SOUP"),
+  "주찬과 국이 모두 돼지고기 계열이면 품질 경고로 남긴다.");
 
 console.log("meal diversity checks passed");

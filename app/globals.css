@@ -62,23 +62,10 @@ button {
   background: #e6f3fe;
   color: #0075de;
 }
-.calendar-cell {
-  min-height: 136px;
-  border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  padding: 10px;
-}
-.calendar-cell:nth-child(7n) {
-  border-right: 0;
-}
 .mobile-sidebar-backdrop {
   transition: opacity 280ms ease-out;
 }
 @media (max-width: 1023px) {
-  .calendar-cell {
-    min-height: 136px;
-    padding: 10px;
-  }
   .app-sidebar {
     transform: translate3d(-100%, 0, 0);
     transition: transform 360ms cubic-bezier(0.22, 1, 0.36, 1);

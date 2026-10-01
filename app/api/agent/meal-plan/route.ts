@@ -11,8 +11,7 @@ type MealPlanRequest = {
     | "UPDATE_DAY"
     | "REVIEW_WEEK"
     | "REGENERATE_RECIPES"
-    | "REGENERATE_GROCERY"
-    | "PUBLISH_MONTH";
+    | "REGENERATE_GROCERY";
   date?: string;
   weekStart?: string;
   family?: { name: string; dietaryNotes?: string }[];
@@ -30,7 +29,6 @@ const ACTION_LABELS: Record<string, string> = {
   PUBLISH_RECIPES: "주간 레시피 재생성",
   REBUILD_SHOPPING: "주간 장보기 재생성",
   WEEKLY_REVIEW_MAINTAINED: "주간 식단 점검",
-  PUBLISH_MONTH: "다음 달 식단 생성",
 };
 
 export async function POST(request: Request) {
@@ -193,21 +191,19 @@ function validateRequest(body: MealPlanRequest) {
   if (!body.prompt?.trim()) return "요청 내용을 입력해 주세요.";
   if (body.prompt.length > 4_000)
     return "요청 내용은 4,000자 이내로 입력해 주세요.";
+  if (body.action && !["PUBLISH_WEEK", "UPDATE_DAY", "REVIEW_WEEK", "REGENERATE_RECIPES", "REGENERATE_GROCERY"].includes(body.action))
+    return "지원하지 않는 식단 작업입니다. 주간 식단을 선택해 주세요.";
   if (
     body.action === "UPDATE_DAY" &&
     !/^\d{4}-\d{2}-\d{2}$/.test(body.date ?? "")
   )
     return "일일 식단 수정에는 올바른 날짜가 필요합니다.";
-  if (body.action === "PUBLISH_MONTH" && !isRealMonth(body.targetMonth ?? ""))
-    return "월간 식단 생성에는 올바른 대상 월이 필요합니다.";
   const weekStart = resolveWeekStart(body);
   if (!weekStart) return "올바른 주 시작 날짜가 필요합니다.";
   return null;
 }
 
 function resolveWeekStart(body: MealPlanRequest) {
-  if (body.action === "PUBLISH_MONTH" && body.targetMonth)
-    return sundayFor(`${body.targetMonth}-01`);
   if (body.weekStart) {
     if (!isRealDate(body.weekStart)) return null;
     const value = new Date(`${body.weekStart}T00:00:00Z`);
@@ -215,12 +211,6 @@ function resolveWeekStart(body: MealPlanRequest) {
   }
   const basis = body.date ?? body.startDate;
   return basis && isRealDate(basis) ? sundayFor(basis) : sundayFor();
-}
-
-function isRealMonth(value: string) {
-  if (!/^\d{4}-\d{2}$/.test(value)) return false;
-  const [year, month] = value.split("-").map(Number);
-  return Number.isInteger(year) && month >= 1 && month <= 12;
 }
 
 function isRealDate(value: string) {

@@ -14,7 +14,6 @@ const actionLabels: Record<string, string> = {
   PUBLISH_WEEK: "주간 식단 생성",
   PUBLISH_RECIPES: "주간 레시피 재생성",
   REBUILD_SHOPPING: "주간 장보기 재생성",
-  PUBLISH_MONTH: "다음 달 식단 생성",
 };
 
 export const runtime = "nodejs";

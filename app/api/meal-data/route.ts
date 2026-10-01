@@ -9,16 +9,13 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
-  const month = params.get("month") ?? "2026-09";
   const week = params.get("week") ?? "2026-08-30";
   const weekStart = new Date(`${week}T00:00:00+09:00`);
   const weekEnd = new Date(weekStart);
   weekEnd.setDate(weekEnd.getDate() + 7);
   const [mealPlans, recipes, shoppingWeek] = await Promise.all([
     prisma.mealPlan.findMany({
-      where: {
-        OR: [{ monthKey: month }, { date: { gte: weekStart, lt: weekEnd } }],
-      },
+      where: { date: { gte: weekStart, lt: weekEnd } },
       orderBy: { date: "asc" },
     }),
     prisma.recipe.findMany({

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { PANTRY_UNITS, PANTRY_STORAGE } from "@/lib/pantry-options";
+import { createHash } from "node:crypto";
 
 type PantryDraft = {
   name?: string;
@@ -15,7 +16,13 @@ type ReviewRequest = {
   avoidFoods?: string;
   note?: string;
   pantry?: PantryDraft[];
+  pantryVersion?: string;
 };
+
+function pantryVersion(items: { id: string; name: string; quantity: number; unit: string; category: string; expiresAt: Date | null; updatedAt: Date }[]) {
+  return createHash("sha256").update(JSON.stringify(items.map((item) => [item.id, item.name, item.quantity,
+    item.unit, item.category, item.expiresAt?.toISOString() ?? null, item.updatedAt.toISOString()]))).digest("hex");
+}
 
 function addDays(date: string, days: number) {
   const value = new Date(`${date}T00:00:00Z`);
@@ -83,6 +90,7 @@ export async function GET(request: Request) {
       ...item,
       expiresAt: item.expiresAt ? formatKst(item.expiresAt) : null,
     })),
+    pantryVersion: pantryVersion(pantry),
     schedules: schedules.map((item) => ({
       ...item,
       date: formatKst(item.date),
@@ -109,6 +117,8 @@ export async function POST(request: Request) {
   const weekStart = sundayFor(referenceDate);
   if (body.pantry !== undefined && !Array.isArray(body.pantry))
     return NextResponse.json({error: "재료 목록 형식이 올바르지 않습니다."}, {status: 400});
+  if (body.pantry !== undefined && !/^[a-f0-9]{64}$/.test(body.pantryVersion ?? ""))
+    return NextResponse.json({error: "보유 재료를 다시 불러온 뒤 저장해 주세요."}, {status: 400});
   const pantry = (body.pantry ?? []).filter((item) => typeof item?.name === "string" && item.name.trim());
   const existingPantry = await prisma.pantryItem.findMany();
   if (
@@ -121,7 +131,13 @@ export async function POST(request: Request) {
       { error: "재료의 수량·단위·보관 위치·날짜를 확인해 주세요. 수량은 0 이상의 숫자여야 합니다." },
       { status: 400 },
     );
-  await prisma.$transaction(async (tx) => {
+  let updatedVersion: string | null = null;
+  try { await prisma.$transaction(async (tx) => {
+    if (body.pantry !== undefined) {
+      const currentPantry = await tx.pantryItem.findMany({ orderBy: [{ expiresAt: "asc" }, { name: "asc" }] });
+      if (pantryVersion(currentPantry) !== body.pantryVersion)
+        throw new Error("PANTRY_CHANGED");
+    }
     await tx.weeklyReview.upsert({
       where: { weekStart: new Date(`${weekStart}T00:00:00+09:00`) },
       create: {
@@ -161,10 +177,17 @@ export async function POST(request: Request) {
             : null,
         },
       });
-    const retainedNames = pantry.map((item) => item.name!.trim());
-    await tx.pantryItem.deleteMany({
-      where: retainedNames.length ? { name: { notIn: retainedNames } } : {},
-    });
-  });
-  return NextResponse.json({ success: true });
+    if (body.pantry !== undefined) {
+      const retainedNames = pantry.map((item) => item.name!.trim());
+      await tx.pantryItem.deleteMany({
+        where: retainedNames.length ? { name: { notIn: retainedNames } } : {},
+      });
+      updatedVersion = pantryVersion(await tx.pantryItem.findMany({ orderBy: [{ expiresAt: "asc" }, { name: "asc" }] }));
+    }
+  }); } catch (error) {
+    if (error instanceof Error && error.message === "PANTRY_CHANGED")
+      return NextResponse.json({error:"다른 화면에서 보유 재료가 변경되었습니다. 다시 불러온 뒤 저장해 주세요."}, {status:409});
+    throw error;
+  }
+  return NextResponse.json({ success: true, pantryVersion: updatedVersion });
 }
