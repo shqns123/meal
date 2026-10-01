@@ -26,6 +26,7 @@
     "test:weekly-wishes": "node scripts/test-weekly-wishes.mjs",
     "test:side-continuity": "node scripts/test-side-continuity.mjs",
     "test:chat-mutation-intent": "node scripts/test-chat-mutation-intent.mjs",
+    "test:chat-meal-deletion": "node scripts/test-chat-meal-deletion.mjs",
     "test:final-meal-quality": "node scripts/test-final-meal-quality.mjs",
     "test:recipe-source": "node scripts/test-recipe-source.mjs",
     "db:agent-migrate": "node scripts/migrate-agent-workflow.mjs",

@@ -41,6 +41,8 @@ if (
     "validate-new-week",
     "publish-new-week",
     "prune-future-meals",
+    "delete-meals",
+    "manage-catalog-weight",
     "refresh-dish-history",
     "validate-week",
     "publish-week",
@@ -91,6 +93,8 @@ function usage() {
   node scripts/mealctl.mjs validate-new-week --input /path/week.json --week YYYY-MM-DD
   node scripts/mealctl.mjs publish-new-week --input /path/week.json --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs prune-future-meals --from YYYY-MM-DD --confirm true
+  node scripts/mealctl.mjs delete-meals --from YYYY-MM-DD [--to YYYY-MM-DD] [--preview true | --confirm true]
+  node scripts/mealctl.mjs manage-catalog-weight --name "기본메뉴" --weight 0..500 [--category "원본 분류"]
   node scripts/mealctl.mjs publish-week --input /path/week.json --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs publish-recipes --input /path/week.json --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs validate-day --input /path/day.json --week YYYY-MM-DD --date YYYY-MM-DD
@@ -2161,6 +2165,111 @@ function pruneFutureMeals(fromDate) {
   }
 }
 
+function deleteMeals(fromDate, toDate = null) {
+  if (!isRealDate(fromDate) || (toDate && (!isRealDate(toDate) || toDate < fromDate)))
+    fail("삭제할 시작일과 종료일을 정확한 날짜 순서로 지정해 주세요.");
+  if (!toDate && fromDate < formatKst(Date.now()))
+    fail("종료일이 없는 전체 미래 삭제는 오늘 이후의 날짜부터만 허용합니다.");
+  if (flags.preview !== "true" && flags.confirm !== "true")
+    fail("식단 삭제에는 --confirm true가 필요합니다.");
+  const rows = db.prepare(
+    'SELECT "date" FROM "MealPlan" WHERE "date">=? AND (? IS NULL OR "date"<=?) ORDER BY "date"',
+  ).all(toMillis(fromDate), toDate ? toMillis(toDate) : null, toDate ? toMillis(toDate) : null);
+  const dates = rows.map((row) => formatKst(row.date));
+  const summary = { fromDate, toDate, deletedMeals: dates.length, dates };
+  if (flags.preview === "true") return printJson({ ...summary, preview: true });
+  if (!dates.length) return printJson({ ...summary, success: true, backup: null });
+  if (db.prepare('PRAGMA quick_check').get()?.quick_check !== "ok")
+    fail("데이터베이스 무결성 검사에 실패하여 삭제하지 않았습니다.");
+  const backupPath = backupDatabase("before-delete-meals");
+  const deleted = new Set(dates);
+  const affectedWeeks = [...new Set(dates.map(sundayFor))];
+  let changedRecipes = 0;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const recipes = db.prepare('SELECT "id","plannedDates" FROM "Recipe"').all();
+    const updateRecipe = db.prepare('UPDATE "Recipe" SET "plannedDates"=?,"weekKeys"=?,"updatedAt"=? WHERE "id"=?');
+    const unlinkRecipe = db.prepare('UPDATE "MealPlan" SET "recipeId"=NULL WHERE "recipeId"=?');
+    const deleteRecipe = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
+    for (const recipe of recipes) {
+      const planned = parseJsonList(recipe.plannedDates);
+      const kept = planned.filter((date) => !deleted.has(date));
+      if (kept.length === planned.length) continue;
+      changedRecipes += 1;
+      if (kept.length) updateRecipe.run(JSON.stringify(kept), JSON.stringify([...new Set(kept.map(sundayFor))].sort()), Date.now(), recipe.id);
+      else { unlinkRecipe.run(recipe.id); deleteRecipe.run(recipe.id); }
+    }
+    const deletePlan = db.prepare('DELETE FROM "MealPlan" WHERE "date"=?');
+    for (const row of rows) deletePlan.run(row.date);
+    const shoppingWeek = db.prepare('SELECT "id" FROM "ShoppingWeek" WHERE "startDate"=?');
+    const clearAutomatic = db.prepare('DELETE FROM "ShoppingItem" WHERE "weekId"=? AND "usePlan"<>? AND "purchased"=0');
+    const preservedPurchase = db.prepare('SELECT "id","name","quantity","unit","category","ownedQuantity","usePlan","purchased" FROM "ShoppingItem" WHERE "weekId"=? AND "purchased"=1');
+    const findShoppingName = db.prepare('SELECT "id","purchased" FROM "ShoppingItem" WHERE "weekId"=? AND "name"=?');
+    const insertShopping = db.prepare('INSERT INTO "ShoppingItem" ("id","name","quantity","unit","category","ownedQuantity","usePlan","purchased","weekId") VALUES (?,?,?,?,?,?,?,?,?)');
+    let removedShoppingItems = 0;
+    const missingByWeek = {};
+    for (const week of affectedWeeks) {
+      const record = shoppingWeek.get(toMillis(week));
+      const purchased = record ? preservedPurchase.all(record.id) : [];
+      const remaining = db.prepare('SELECT COUNT(*) AS "count" FROM "MealPlan" WHERE "date">=? AND "date"<?')
+        .get(toMillis(week), toMillis(addDays(week, 7))).count;
+      if (remaining) {
+        writeShopping(week, storedRecipes(week, { skipInvalid: true }), Date.now());
+        missingByWeek[week] = missingStoredCoverage(week);
+      } else if (record) {
+        removedShoppingItems += clearAutomatic.run(record.id, "직접 추가").changes;
+        missingByWeek[week] = [];
+      }
+      const currentWeek = shoppingWeek.get(toMillis(week));
+      for (const item of purchased) {
+        const match = findShoppingName.get(currentWeek.id, item.name);
+        if (match) {
+          if (!match.purchased) db.prepare('UPDATE "ShoppingItem" SET "purchased"=1 WHERE "id"=?').run(match.id);
+        } else insertShopping.run(item.id, item.name, item.quantity, item.unit, item.category,
+          item.ownedQuantity, item.usePlan, item.purchased, currentWeek.id);
+      }
+    }
+    syncDishLastPlannedAt();
+    db.exec("COMMIT");
+    printJson({ ...summary, success: true, affectedWeeks, changedRecipes, removedShoppingItems,
+      missingByWeek, shoppingComplete: Object.values(missingByWeek).every((missing) => missing.length === 0), backup: backupPath });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+}
+
+function manageCatalogWeightForChat(name, weight, category = null) {
+  const baseName = String(name ?? "").trim();
+  const weightPercent = Number(weight);
+  if (!baseName || !Number.isInteger(weightPercent) || weightPercent < 0 || weightPercent > 500)
+    fail("기본메뉴 이름과 0~500 사이의 정수 가중치가 필요합니다.");
+  if (!fs.existsSync(catalogPath)) fail("메뉴 카탈로그 파일을 찾지 못했습니다.");
+  const catalog = new DatabaseSync(catalogPath, { readOnly: true });
+  let matches;
+  try {
+    matches = catalog.prepare('SELECT "sourceCategory","name" FROM "RecipeCatalogMenu" WHERE "name"=?')
+      .all(baseName).filter((item) => !category || item.sourceCategory === category);
+  } finally { catalog.close(); }
+  if (matches.length !== 1)
+    fail(matches.length ? "같은 이름의 기본메뉴가 여러 분류에 있습니다. 분류를 함께 알려주세요."
+      : "카탈로그에서 정확히 일치하는 기본메뉴를 찾지 못했습니다.");
+  const sourceCategory = matches[0].sourceCategory;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (weightPercent === 100)
+      db.prepare('DELETE FROM "CatalogMenuWeight" WHERE "sourceCategory"=? AND "baseName"=?')
+        .run(sourceCategory, baseName);
+    else db.prepare('INSERT INTO "CatalogMenuWeight" ("id","sourceCategory","baseName","weightPercent","updatedAt") VALUES (?,?,?,?,?) ON CONFLICT("sourceCategory","baseName") DO UPDATE SET "weightPercent"=excluded."weightPercent","updatedAt"=excluded."updatedAt"')
+      .run(crypto.randomUUID(), sourceCategory, baseName, weightPercent, Date.now());
+    db.exec("COMMIT");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+  printJson({ success: true, sourceCategory, baseName, weightPercent });
+}
+
 function deleteRecipeForChat(weekStart, title, category = null, date = null, deleteAll = false) {
   const selectedWeek = requireWeek(weekStart);
   const selectedTitle = String(title ?? "").trim();
@@ -2792,6 +2901,8 @@ try {
   }
   if (command === "publish-new-week") publishNewWeek(readPayload(flags.input), requireWeek(flags.week), flags["request-id"]);
   if (command === "prune-future-meals") pruneFutureMeals(flags.from);
+  if (command === "delete-meals") deleteMeals(flags.from, flags.to);
+  if (command === "manage-catalog-weight") manageCatalogWeightForChat(flags.name, flags.weight, flags.category);
   if (command === "refresh-dish-history") refreshDishHistory();
   if (command === "validate-week") {
     const payload = readPayload(flags.input);

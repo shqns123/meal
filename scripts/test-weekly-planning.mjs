@@ -199,6 +199,47 @@ try {
     .all(Date.parse(`${boundaryWeek}T00:00:00+09:00`), Date.parse(`${addDays(boundaryWeek, 7)}T00:00:00+09:00`))
     .map((row) => row.monthKey), [boundaryWeek.slice(0, 7), addDays(boundaryWeek, 6).slice(0, 7)]);
   boundary.close();
+  const deleteFrom = addDays(boundaryWeek, 2), deleteTo = addDays(boundaryWeek, 3);
+  const deletionFixture = new DatabaseSync(dbPath);
+  deletionFixture.prepare('INSERT INTO "Recipe" ("id","title","category","plannedDates","weekKeys","instructions","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?)')
+    .run("test-bounded-recipe", "테스트경계메뉴", "주찬", JSON.stringify([deleteFrom, addDays(boundaryWeek, 4)]),
+      JSON.stringify([boundaryWeek]), "test", Date.now(), Date.now());
+  deletionFixture.prepare('INSERT OR IGNORE INTO "ShoppingWeek" ("id","startDate","endDate","createdAt") VALUES (?,?,?,?)')
+    .run(`shopping-week-${boundaryWeek}`, Date.parse(`${boundaryWeek}T00:00:00+09:00`),
+      Date.parse(`${addDays(boundaryWeek, 6)}T00:00:00+09:00`), Date.now());
+  const deletionWeekId = deletionFixture.prepare('SELECT "id" FROM "ShoppingWeek" WHERE "startDate"=?')
+    .get(Date.parse(`${boundaryWeek}T00:00:00+09:00`)).id;
+  deletionFixture.prepare('INSERT INTO "ShoppingItem" ("id","name","quantity","unit","category","ownedQuantity","usePlan","purchased","weekId") VALUES (?,?,?,?,?,?,?,?,?)')
+    .run("test-delete-manual", "삭제후직접추가", 1, "개", "기타", 0, "직접 추가", 0, deletionWeekId);
+  deletionFixture.prepare('INSERT INTO "ShoppingItem" ("id","name","quantity","unit","category","ownedQuantity","usePlan","purchased","weekId") VALUES (?,?,?,?,?,?,?,?,?)')
+    .run("test-delete-purchased", "삭제후구매완료", 1, "개", "기타", 0, "자동", 1, deletionWeekId);
+  deletionFixture.close();
+  const previewDelete = ctl("delete-meals", "--from", deleteFrom, "--to", deleteTo, "--preview", "true");
+  assert.deepEqual(previewDelete.dates, [deleteFrom, deleteTo]);
+  const deleted = ctl("delete-meals", "--from", deleteFrom, "--to", deleteTo, "--confirm", "true");
+  assert.equal(deleted.deletedMeals, 2);
+  assert.ok(fs.existsSync(deleted.backup));
+  const deletionDb = new DatabaseSync(dbPath, { readOnly: true });
+  assert.equal(deletionDb.prepare('SELECT COUNT(*) AS count FROM "MealPlan" WHERE "date">=? AND "date"<?')
+    .get(Date.parse(`${boundaryWeek}T00:00:00+09:00`), Date.parse(`${addDays(boundaryWeek, 7)}T00:00:00+09:00`)).count, 5);
+  assert.deepEqual(JSON.parse(deletionDb.prepare('SELECT "plannedDates" FROM "Recipe" WHERE "id"=?')
+    .get("test-bounded-recipe").plannedDates), [addDays(boundaryWeek, 4)]);
+  assert.equal(deletionDb.prepare('SELECT COUNT(*) AS count FROM "ShoppingItem" WHERE "id"=?')
+    .get("test-delete-manual").count, 1);
+  assert.equal(deletionDb.prepare('SELECT "purchased" FROM "ShoppingItem" WHERE "id"=?')
+    .get("test-delete-purchased").purchased, 1);
+  deletionDb.close();
+  const catalogDb = new DatabaseSync(sourceCatalog, { readOnly: true });
+  const weightedMenu = catalogDb.prepare('SELECT "sourceCategory","name" FROM "RecipeCatalogMenu" ORDER BY "sourceCategory","name" LIMIT 1').get();
+  catalogDb.close();
+  const weighted = ctl("manage-catalog-weight", "--name", weightedMenu.name,
+    "--category", weightedMenu.sourceCategory, "--weight", "50");
+  assert.equal(weighted.weightPercent, 50);
+  const weightDb = new DatabaseSync(dbPath, { readOnly: true });
+  assert.equal(weightDb.prepare('SELECT "weightPercent" FROM "CatalogMenuWeight" WHERE "sourceCategory"=? AND "baseName"=?')
+    .get(weightedMenu.sourceCategory, weightedMenu.name).weightPercent, 50);
+  weightDb.close();
+  ctl("manage-catalog-weight", "--name", weightedMenu.name, "--category", weightedMenu.sourceCategory, "--weight", "100");
   console.log("weekly planning integration checks passed");
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });

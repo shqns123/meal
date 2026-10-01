@@ -10,6 +10,7 @@ import path from "node:path";
 import { selectedMutationMonth } from "../lib/agent-request-utils.mjs";
 import { assertReviewDates } from "../lib/review-scope.mjs";
 import { requestsMealDataChange, requestsSelectedWeekRegeneration } from "../lib/chat-mutation-intent.mjs";
+import { ambiguousOldConfirmation, confirmedFollowup, mealDeletionScope, requestsMealDeletion } from "../lib/chat-meal-deletion.mjs";
 
 const root = process.env.MEAL_PLAN_ROOT || process.cwd();
 const queuedPath = process.argv[2];
@@ -199,6 +200,7 @@ function effectiveMutationInstruction() {
     : null;
 }
 function confirmationQuestion(decisions, instruction) {
+  if (task.confirmedFollowup) return null;
   const confirmed = /(확인했|확인\s*후|동의|진행\s*해|실행\s*해|그래\s*,?\s*해|정말\s*삭제)/.test(
     String(instruction || ""),
   );
@@ -227,6 +229,11 @@ function validWeek(value) {
 }
 async function classifyChatMutations(ruleFiles) {
   const targetMonth = selectedMutationMonth(task.message, task.targetMonth);
+  if (requestsMealDeletion(task.message)) {
+    if (/(?:재구성|재생성|새로\s*만들|장보기|재고|가중치|선택\s*확률|취향)/.test(task.message))
+      return [{ intent: "CLARIFY", answer: "식단 삭제와 다른 변경은 한 번에 실행하지 않습니다. 삭제할 날짜 범위를 먼저 요청해 주세요." }];
+    return [{ intent: "DELETE_MEALS" }];
+  }
   if (requestsSelectedWeekRegeneration(task.message))
     return [{ intent: "REGENERATE_WEEK", weekStart: task.weekStart }];
   if (
@@ -242,25 +249,26 @@ async function classifyChatMutations(ruleFiles) {
   const result = await ask(
     systemPrompt(ruleFiles) +
       `\n\n사용자의 변경 요청을 실행 순서대로 하나 이상의 앱 기능으로 분류한다. 실제 변경은 하지 말고 아래 JSON만 반환한다.
-intent는 UPDATE_MEALS, GENERATE_WEEK, REGENERATE_WEEK, REGENERATE_RECIPES, ADD_RECIPE, DELETE_RECIPE, REGENERATE_GROCERY, ADD_GROCERY, DELETE_GROCERY, SET_GROCERY_PURCHASED, MANAGE_PANTRY, UPDATE_FAMILY, UPDATE_WEEKLY_REVIEW, UPDATE_PREFERENCE, UPDATE_ATTENDANCE, CLARIFY 중 하나다.
+intent는 UPDATE_MEALS, DELETE_MEALS, GENERATE_WEEK, REGENERATE_WEEK, REGENERATE_RECIPES, ADD_RECIPE, DELETE_RECIPE, REGENERATE_GROCERY, ADD_GROCERY, DELETE_GROCERY, SET_GROCERY_PURCHASED, MANAGE_PANTRY, UPDATE_FAMILY, UPDATE_WEEKLY_REVIEW, UPDATE_PREFERENCE, UPDATE_ATTENDANCE, SET_CATALOG_WEIGHT, CLARIFY 중 하나다.
 식단이 없는 특정 주를 만들어 달라는 요청은 GENERATE_WEEK, 이미 있는 주 전체를 다시 구성하라는 요청은 REGENERATE_WEEK다. 월간 생성은 지원하지 않으며 월 전체 요청에는 주차를 물어보는 CLARIFY를 반환한다.
 레시피 추가는 반드시 현재 식단에 있는 메뉴의 레시피를 보충하는 의미다. 레시피 삭제는 제목이 특정되어야 한다.
 냉장고·펜트리·보유 재료의 추가·수정·증감·삭제는 MANAGE_PANTRY다. 가족의 알레르기·씹기·매운맛·선호 메모 변경은 UPDATE_FAMILY다. 이번 주만 먹고 싶은 음식·피할 음식·주간 메모 저장은 UPDATE_WEEKLY_REVIEW다. 이 경우 지속 취향을 변경하지 않는다.
+카탈로그 기본메뉴의 선택 확률·가중치를 0~500% 정수로 지정하면 SET_CATALOG_WEIGHT다. 정확한 기본메뉴명 또는 퍼센트가 없으면 CLARIFY다. 기존 식단은 바꾸지 않는다.
 구체적인 메뉴에 대해 앞으로 넣어줘·앞으로 빼줘·먹어봤어·생소해처럼 지속 취향이나 익숙함을 알려주면 UPDATE_PREFERENCE다. 식단 편성이나 레시피 존재로 취향을 추론하지 않는다. usage와 familiarity는 독립이며 사용자가 말한 필드만 포함한다. 가족 대상이 생략된 일반 요청은 family, 아기만 등의 명시가 있으면 해당 role이다. 오늘 메뉴·이것 등의 지시어는 현재 컨텍스트로 단일 메뉴를 식별할 수 없으면 CLARIFY다. 취향 저장만 요청했으면 UPDATE_MEALS를 추가하지 않는다. '잘 먹었어'만으로 ALLOW를 기록하지 않는다. 메뉴 구분은 현재 후보로 확인하고 여러 구분에 있으면 CLARIFY다.
 날짜·제목·품목이 불명확하여 여러 대상을 바꿀 수 있으면 CLARIFY와 자연스러운 한국어 answer를 반환한다.
 이번 주는 ${task.weekStart}, 선택 월은 ${targetMonth}, 오늘은 ${currentKstDate()}다.
 레시피를 모두·전부·전체 삭제하라는 명시적 요청에만 all을 true로 한다.
 서로 독립된 변경이 여러 개면 actions에 각각 넣는다. 한 작업의 대상이 모호하면 CLARIFY 하나만 반환한다. 최대 20개다. 가격 데이터가 없는 상태에서 정확한 예산 상한을 요구하면 저장하지 말고 CLARIFY로 현재는 금액 준수를 보장할 수 없다고 답한다.
-형식: {"actions":[{"intent":"...","answer":"확인 질문 또는 빈 문자열","month":"YYYY-MM","weekStart":"YYYY-MM-DD 일요일","date":"YYYY-MM-DD 또는 null","dates":["YYYY-MM-DD"],"title":"레시피 제목 또는 null","category":"주찬|반찬|점심|null","all":false,"groceryName":"품목명 또는 null","quantity":1,"unit":"개","groceryCategory":"기타","purchased":true,"pantry":{"operation":"upsert|adjust|delete","name":"재료명","quantity":1,"unit":"g|kg|ml|L|개|팩|봉|병|캔|모|단|통|장|마리","category":"냉장|냉동|실온|기타","expiresAt":"YYYY-MM-DD 또는 null"},"preference":{"name":"정확한 메뉴명","category":"주찬|부찬|국/탕/찌개|한그릇|점심|아기","scope":"family|father|mother|child","usage":"UNKNOWN|ALLOW|AVOID (사용 여부를 말한 경우만)","familiarity":"UNKNOWN|FAMILIAR|UNFAMILIAR (익숙함을 말한 경우만)","note":"명시한 메모만"},"familyUpdate":{"role":"father|mother|child","name":null,"allergies":null,"chewingAbility":null,"spiceTolerance":null,"dietaryNotes":null},"weeklyReview":{"referenceDate":"YYYY-MM-DD","wantedFoods":null,"avoidFoods":null,"note":null},"dinnerDiningOut":null,"attendance":[{"role":"father|mother","lunchNotAtHome":true,"dinnerNotAtHome":false,"isWorking":null,"eatsAtCompany":null,"isAway":null,"note":null}]}]}`,
+형식: {"actions":[{"intent":"...","answer":"확인 질문 또는 빈 문자열","month":"YYYY-MM","weekStart":"YYYY-MM-DD 일요일","date":"YYYY-MM-DD 또는 null","dates":["YYYY-MM-DD"],"title":"레시피 제목 또는 null","category":"주찬|반찬|점심|null","all":false,"catalogBaseName":"정확한 기본메뉴명 또는 null","sourceCategory":"카탈로그 원본 분류 또는 null","weightPercent":100,"groceryName":"품목명 또는 null","quantity":1,"unit":"개","groceryCategory":"기타","purchased":true,"pantry":{"operation":"upsert|adjust|delete","name":"재료명","quantity":1,"unit":"g|kg|ml|L|개|팩|봉|병|캔|모|단|통|장|마리","category":"냉장|냉동|실온|기타","expiresAt":"YYYY-MM-DD 또는 null"},"preference":{"name":"정확한 메뉴명","category":"주찬|부찬|국/탕/찌개|한그릇|점심|아기","scope":"family|father|mother|child","usage":"UNKNOWN|ALLOW|AVOID (사용 여부를 말한 경우만)","familiarity":"UNKNOWN|FAMILIAR|UNFAMILIAR (익숙함을 말한 경우만)","note":"명시한 메모만"},"familyUpdate":{"role":"father|mother|child","name":null,"allergies":null,"chewingAbility":null,"spiceTolerance":null,"dietaryNotes":null},"weeklyReview":{"referenceDate":"YYYY-MM-DD","wantedFoods":null,"avoidFoods":null,"note":null},"dinnerDiningOut":null,"attendance":[{"role":"father|mother","lunchNotAtHome":true,"dinnerNotAtHome":false,"isWorking":null,"eatsAtCompany":null,"isAway":null,"note":null}]}]}`,
     `[사용자 요청]\n${task.message}\n[현재 주간 컨텍스트]\n${JSON.stringify(context(task.weekStart))}`,
     false,
   );
   const classified = modelJson(result.content);
   const allowed = new Set([
-    "UPDATE_MEALS", "GENERATE_WEEK", "REGENERATE_WEEK", "REGENERATE_RECIPES",
+    "UPDATE_MEALS", "DELETE_MEALS", "GENERATE_WEEK", "REGENERATE_WEEK", "REGENERATE_RECIPES",
     "ADD_RECIPE", "DELETE_RECIPE", "REGENERATE_GROCERY", "ADD_GROCERY",
     "DELETE_GROCERY", "SET_GROCERY_PURCHASED", "MANAGE_PANTRY",
-    "UPDATE_FAMILY", "UPDATE_WEEKLY_REVIEW", "UPDATE_PREFERENCE", "UPDATE_ATTENDANCE", "CLARIFY",
+    "UPDATE_FAMILY", "UPDATE_WEEKLY_REVIEW", "UPDATE_PREFERENCE", "UPDATE_ATTENDANCE", "SET_CATALOG_WEIGHT", "CLARIFY",
   ]);
   const rawDecisions = Array.isArray(classified.actions)
     ? classified.actions
@@ -696,6 +704,27 @@ async function dispatchChatMutation(ruleFiles, decision) {
       sources: [],
     };
   if (decision.intent === "UPDATE_MEALS") return runChatMealChange(ruleFiles);
+  if (decision.intent === "SET_CATALOG_WEIGHT") {
+    if (!String(decision.catalogBaseName || "").trim() || !Number.isInteger(decision.weightPercent))
+      return { answer: "설정할 정확한 기본메뉴명과 0~500% 사이의 가중치를 알려주세요.", sources: [] };
+    const result = JSON.parse(ctl("manage-catalog-weight", "--name", decision.catalogBaseName,
+      "--weight", String(decision.weightPercent), ...(decision.sourceCategory ? ["--category", decision.sourceCategory] : [])));
+    return { answer: `${result.sourceCategory}의 ${result.baseName} 선택 가중치를 ${result.weightPercent}%로 저장했습니다. 기존 식단은 유지하고 이후 생성부터 적용합니다.`, sources: [] };
+  }
+  if (decision.intent === "DELETE_MEALS") {
+    const scope = mealDeletionScope(task.message, task.conversation || [], currentKstDate());
+    if (!scope) return { answer: "삭제할 식단 날짜 범위를 정확히 알려주세요. 예: ‘2026년 10월 4일부터 10월 31일까지 식단 삭제해줘’. ", sources: [] };
+    const args = ["--from", scope.from, ...(scope.to ? ["--to", scope.to] : [])];
+    const preview = JSON.parse(ctl("delete-meals", ...args, "--preview", "true"));
+    const range = scope.to ? `${scope.from}부터 ${scope.to}까지` : `${scope.from}부터 저장된 모든 미래 날짜`;
+    if (!preview.deletedMeals) return { answer: `${range}에 저장된 식단이 없어 삭제할 내용이 없습니다.`, sources: [] };
+    if (task.confirmedDeleteCount !== undefined && task.confirmedDeleteCount !== preview.deletedMeals)
+      return { answer: `삭제 확인: 확인 후 대상이 ${task.confirmedDeleteCount}일에서 변경됐습니다. ${range}의 식단 ${preview.deletedMeals}일을 삭제할까요? 맞으면 ‘응’이라고 답해 주세요.`, sources: [] };
+    if (!task.confirmedFollowup) return { answer: `삭제 확인: ${range}의 식단 ${preview.deletedMeals}일과 해당 날짜의 레시피 연결을 삭제할까요? 삭제 전 SQLite 백업을 만듭니다. 맞으면 ‘응’이라고 답해 주세요.`, sources: [] };
+    const result = JSON.parse(ctl("delete-meals", ...args, "--confirm", "true"));
+    const missing = Object.values(result.missingByWeek ?? {}).flat();
+    return { answer: `${range}의 식단 ${result.deletedMeals}일을 삭제했습니다. 연결된 레시피 ${result.changedRecipes}건을 정리했고, SQLite 백업을 만들었습니다. 남은 식단의 자동 장보기를 다시 계산하고 직접 추가한 품목과 구매 완료 상태는 유지했습니다.${missing.length ? ` 레시피가 없는 메뉴 ${missing.length}개가 있어 장보기 계산은 아직 미완료입니다.` : ""}`, sources: [] };
+  }
   if (decision.intent === "GENERATE_WEEK") {
     const week = decision.weekStart;
     if (context(week).meals?.length)
@@ -851,6 +880,18 @@ async function completePayload(payload, current, ruleFiles, scope, runValidation
 
 async function runChat() {
   const ruleFiles = rules();
+  const confirmed = confirmedFollowup(task.message, task.conversation || []);
+  if (!confirmed && ambiguousOldConfirmation(task.message, task.conversation || [])) {
+    publish("reply-chat", writeInput("chat-" + task.requestId, {
+      answer: "이전 삭제 확인은 대상 범위를 안전하게 확정할 수 없습니다. 삭제할 날짜 범위를 다시 적어 주세요. 예: ‘2026년 10월 4일부터 10월 31일까지 식단 삭제해줘’. 그러면 삭제 건수를 확인한 뒤 실행하겠습니다.",
+      sources: [],
+    }), ["--id", task.requestId]);
+    notify();
+    return;
+  }
+  task.confirmedFollowup = Boolean(confirmed);
+  task.confirmedDeleteCount = confirmed?.expectedCount;
+  if (confirmed) task.message = confirmed.message;
   const mutationInstruction = effectiveMutationInstruction();
   if (mutationInstruction) {
     task.message = mutationInstruction;
