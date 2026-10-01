@@ -6,6 +6,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { preferenceContext, savePreference, validateMealPreferences } from "./dish-preferences.mjs";
 import { splitWeeklyFoods, weeklyWishBoost } from "../lib/weekly-wishes.mjs";
+import { adjacentSidePair, previousSideBatch } from "../lib/side-continuity.mjs";
 import {
   missingRecipeCoverage,
   requiresLunchRecipe,
@@ -318,12 +319,18 @@ function loadContext(weekStart, seedSalt = "") {
   const recentRows = db.prepare(
     'SELECT "date","mainDish","soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
   ).all(toMillis(addDays(weekStart, -30)), startMs);
+  const usage = catalogUsage();
+  const priorSides = previousSideBatch(recentRows.map((meal) => ({
+    date: formatKst(meal.date), sides: parseJsonList(meal.sideDishes),
+  })), weekStart);
+  const initialSidePair = priorSides
+    ? compatibleCatalogSidePair(priorSides.pair, weekStart, catalogItems, usage) : null;
   const weeklyPreview = catalogSelectionPreview({
     catalog: catalogItems,
     dates: Array.from({ length: 7 }, (_, index) => addDays(weekStart, index)),
     history: catalogHistory(catalogItems, recentRows),
     month: weekStart,
-    usage: catalogUsage(), seedSalt,
+    usage, seedSalt, initialSidePair, initialSideDays: initialSidePair ? priorSides.days : 0,
     styles: new Map(mealRows.map((meal) => [formatKst(meal.date), meal.mealStyle])),
   });
   const weeklyPlans = weeklyPreview.map((item) => ({
@@ -1046,6 +1053,25 @@ function isCatalogItemAllowed(item) {
       || item.ingredientCategories.some((category) => category.includes(ingredient))
     ));
 }
+function compatibleCatalogSidePair(names, date, catalog, usage) {
+  const excluded = weeklyRequestTerms(date, "avoidFoods");
+  const weights = catalogMenuWeights();
+  const pair = names?.map((name) => catalog.find((item) => item.sourceCategory === "밑반찬"
+    && normalizeName(item.variantName) === normalizeName(name)
+    && isCatalogItemAllowed(item)
+    && usage.get(`부찬|${normalizeName(item.variantName)}`) !== "AVOID"
+    && (weights.get(`${item.sourceCategory}|${item.baseName}`) ?? 1) > 0
+    && !excluded.some((avoid) => item.variantName.includes(avoid) || item.baseName.includes(avoid))));
+  if (pair?.length !== 2 || pair.some((item) => !item) || pair[0].variantName === pair[1].variantName)
+    return null;
+  return pair.map((item) => ({
+    name: item.variantName, baseMenu: item.baseName, cookingFamily: item.cookingFamily,
+    cookingMethods: item.cookingMethods, cookingMethodOrigin: item.cookingMethodOrigin,
+    ingredientCategories: item.ingredientCategories, ingredientCategoryOrigin: item.ingredientCategoryOrigin,
+    similarGroup: item.similarGroup, flavorFamily: item.flavorFamily,
+    primaryIngredient: item.primaryIngredient, sourceCategory: item.sourceCategory,
+  }));
+}
 function weeklyRequestTerms(date, field) {
   const review = db.prepare('SELECT "referenceDate","weekStart","avoidFoods","wantedFoods" FROM "WeeklyReview" WHERE "weekStart"=?')
     .get(toMillis(sundayFor(date)));
@@ -1157,16 +1183,19 @@ function generatedMealStyles(dates, month, overrides = new Map()) {
   }
   return output;
 }
-function catalogSelectionPreview({ catalog, dates, history, month, usage, styles = new Map(), seedSalt = "" }) {
+function catalogSelectionPreview({ catalog, dates, history, month, usage, styles = new Map(), seedSalt = "",
+  initialSidePair = null, initialSideDays = 0 }) {
   const evolvingHistory = [...history];
   const generatedStyles = generatedMealStyles(dates, month, styles);
-  let sidePair = null;
-  return dates.map((date, index) => {
+  let sidePair = initialSidePair;
+  let sideDays = initialSidePair ? initialSideDays : 0;
+  return dates.map((date) => {
     const mealStyle = generatedStyles.get(date);
-    const selectSides = index % 3 === 0 || !sidePair;
+    const selectSides = sideDays >= 3 || !sidePair?.length;
     const selection = selectionForMealStyle({ catalog, history: evolvingHistory, date, mealStyle, seed: `${month}:${date}:${seedSalt}`, usage, pickSides: selectSides,
       existingSides: selectSides ? [] : sidePair ?? [] });
-    if (selectSides) sidePair = selection.sides;
+    if (selectSides) { sidePair = selection.sides; sideDays = 0; }
+    sideDays += 1;
     const withStatus = (item) => item && {
       ...item,
       status: usage.get(`${catalogRole(item.sourceCategory)}|${normalizeName(item.name)}`) === "ALLOW" ? "ALLOW" : "UNKNOWN",
@@ -1190,12 +1219,21 @@ function generateCatalogDay(date, slot = "all", seedSalt = "") {
   const selection = current.menuCatalog.selectionPreview.find((entry) => entry.date === date);
   const existing = db.prepare('SELECT "lunchPlan","mainDish","soupDish","mealStyle","sideDishes","cookingNote" FROM "MealPlan" WHERE "date"=?').get(toMillis(date));
   if (!selection || !existing) fail(`${date}의 식단 또는 카탈로그 후보를 찾지 못했습니다.`);
+  const adjacentRows = slot === "all" ? db.prepare(
+    'SELECT "date","sideDishes" FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"',
+  ).all(toMillis(addDays(date, -4)), toMillis(addDays(date, 5))) : [];
+  const adjacentCatalog = slot === "all" ? loadCatalogItems() : [];
+  const adjacentUsage = slot === "all" ? catalogUsage() : new Map();
+  const connectedSides = slot === "all" ? adjacentSidePair(adjacentRows.map((row) => ({
+    date: formatKst(row.date), sides: parseJsonList(row.sideDishes),
+  })), date).map((pair) => compatibleCatalogSidePair(pair, date, adjacentCatalog, adjacentUsage))
+    .find(Boolean) : null;
   const changedSides = slot.startsWith("side-") ? parseJsonList(existing.sideDishes).map((item, index) => index === Number(slot.slice(5)) ? selection.sides[index]?.name ?? item : item) : null;
   const makeChange = (targetDate, plan) => ({
     date: targetDate, lunch: plan.lunchPlan, mealStyle: slot === "all" ? selection.mealStyle : plan.mealStyle,
     main: slot.startsWith("side") ? plan.mainDish : selection.main?.name,
     soup: slot === "all" ? selection.soup?.name ?? null : plan.soupDish,
-    sides: slot.startsWith("side-") ? parseJsonList(plan.sideDishes).map((item, index) => index === Number(slot.slice(5)) ? changedSides?.[index] ?? item : item) : slot === "main" ? parseJsonList(plan.sideDishes) : selection.sides.map((item) => item.name),
+    sides: slot.startsWith("side-") ? parseJsonList(plan.sideDishes).map((item, index) => index === Number(slot.slice(5)) ? changedSides?.[index] ?? item : item) : slot === "main" ? parseJsonList(plan.sideDishes) : (connectedSides ?? selection.sides).map((item) => item.name),
     note: "카탈로그 세부메뉴 자동 선택",
   });
   let changes = [makeChange(date, existing)];

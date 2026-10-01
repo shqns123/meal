@@ -46,7 +46,15 @@ try {
   assert.ok(pruned.deletedMeals > 0);
   assert.ok(fs.existsSync(pruned.backup));
   let payload = ctl("generate-catalog-week", "--week", weekStart, "--salt", "integration");
+  const carriedSides = payload.mealChanges[0].sides;
   const reviewDb = new DatabaseSync(dbPath);
+  const previousSaturday = Date.parse(`${addDays(weekStart, -1)}T00:00:00+09:00`);
+  assert.ok(reviewDb.prepare('SELECT 1 FROM "MealPlan" WHERE "date"=?').get(previousSaturday),
+    "a saved prior Saturday is required to verify cross-week sides");
+  reviewDb.prepare('UPDATE "MealPlan" SET "sideDishes"=? WHERE "date"=?')
+    .run(JSON.stringify(carriedSides), previousSaturday);
+  reviewDb.prepare('UPDATE "MealPlan" SET "sideDishes"=? WHERE "date"=?')
+    .run(JSON.stringify(["앞주다른부찬1", "앞주다른부찬2"]), Date.parse(`${addDays(weekStart, -2)}T00:00:00+09:00`));
   reviewDb.prepare('INSERT INTO "WeeklyReview" ("id","weekStart","referenceDate","wantedFoods","avoidFoods","note","createdAt","updatedAt") VALUES (?,?,?,?,?,?,?,?)')
     .run("test-weekly-review", cutoff, cutoff, "카레", "", null, Date.now(), Date.now());
   reviewDb.close();
@@ -57,6 +65,8 @@ try {
     { cwd: project, env, encoding: "utf8", timeout: 120_000 });
   assert.notEqual(staleWeek.status, 0, "a changed weekly review must invalidate an older generated week");
   payload = ctl("generate-catalog-week", "--week", weekStart, "--salt", "integration");
+  assert.deepEqual(payload.mealChanges[0].sides, carriedSides, "Sunday should finish Saturday's side batch");
+  assert.deepEqual(payload.mealChanges[1].sides, carriedSides, "a one-day Saturday batch should continue through Monday");
   assert.deepEqual(payload.mealChanges.map((change) => change.date),
     Array.from({ length: 7 }, (_, index) => addDays(weekStart, index)));
   assert.ok(payload.mealChanges.every((change) => change.main && change.sides.length === 2
@@ -134,6 +144,13 @@ try {
   fs.writeFileSync(input, JSON.stringify(regenerated));
   assert.equal(ctl("publish-days", "--input", input).mealChanges, 7,
     "regenerating an existing week must publish all seven dates");
+  const connectedDay = ctl("generate-catalog-day", "--date", dated[0].date, "--slot", "all", "--salt", "adjacent-sides");
+  const neighborDb = new DatabaseSync(dbPath, { readOnly: true });
+  const nextDaySides = JSON.parse(neighborDb.prepare('SELECT "sideDishes" FROM "MealPlan" WHERE "date"=?')
+    .get(Date.parse(`${addDays(dated[0].date, 1)}T00:00:00+09:00`)).sideDishes);
+  neighborDb.close();
+  assert.deepEqual(connectedDay.mealChanges[0].sides, nextDaySides,
+    "editing a day should keep the adjacent stored side batch when it can continue");
   const dayBefore = new DatabaseSync(dbPath, { readOnly: true });
   const firstDateMs = Date.parse(`${dated[0].date}T00:00:00+09:00`);
   const originalDay = dayBefore.prepare('SELECT "soupDish","mealStyle","sideDishes" FROM "MealPlan" WHERE "date"=?').get(firstDateMs);

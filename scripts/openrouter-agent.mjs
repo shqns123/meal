@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { selectedMutationMonth } from "../lib/agent-request-utils.mjs";
 import { assertReviewDates } from "../lib/review-scope.mjs";
+import { requestsMealDataChange, requestsSelectedWeekRegeneration } from "../lib/chat-mutation-intent.mjs";
 
 const root = process.env.MEAL_PLAN_ROOT || process.cwd();
 const queuedPath = process.argv[2];
@@ -178,15 +179,6 @@ function citations(annotations) {
   return annotations.map((value) => value && value.url_citation).filter((value) => value && value.url && /^https?:\/\//.test(value.url)).slice(0, 8)
     .map((value) => ({ title: value.title || undefined, url: value.url }));
 }
-function requestsMealDataChange(message) {
-  if (/(앞으로|다음에도|먹어봤|생소|익숙|취향|넣어도|피해주세요|좋아(?:해|요)?|싫어(?:해|요)?)/.test(String(message || ""))) return true;
-  const text = String(message || "").replace(/\s+/g, " ");
-  const mentionsMealData =
-    /(월간|주간|식단|메뉴|주찬|부찬|반찬|점심|저녁|레시피|장보기|외식|미식사|식사\s*여부|집에서\s*(?:먹|식사)|냉장고|펜트리|보유\s*재료|재고|가족|알레르기|선호|기피|씹기|매운맛|주간\s*점검|일정|출근|출장|부재|회사\s*식사)/.test(text);
-  const asksToChange =
-    /(바꿔|바꾸어|바꿔\s*달|변경\s*해|수정\s*해|교체\s*해|삭제|지워|추가|등록|재생성|재설정|초기화|새로\s*(?:짜|만들)|짜\s*줘|만들어\s*줘|반영\s*해|저장\s*해|구매\s*(?:완료|취소)|미식사|외식|넣어|빼\s*줘|남았|소진|다\s*먹|없어졌|출근|출장|부재|회사\s*식사)/.test(text);
-  return mentionsMealData && asksToChange;
-}
 function effectiveMutationInstruction() {
   if (requestsMealDataChange(task.message)) return task.message;
   const followUp = /(그걸|그렇게|이걸|앞에서|방금|해\s*줘|해주세요|부터|까지|전부|모두)/.test(
@@ -235,6 +227,8 @@ function validWeek(value) {
 }
 async function classifyChatMutations(ruleFiles) {
   const targetMonth = selectedMutationMonth(task.message, task.targetMonth);
+  if (requestsSelectedWeekRegeneration(task.message))
+    return [{ intent: "REGENERATE_WEEK", weekStart: task.weekStart }];
   if (
     /(?:예산|식비)[^\n]{0,30}\d[\d,]*(?:만\s*)?원[^\n]{0,20}(?:안으로|이하|넘지|맞춰)/.test(String(task.message || "")) &&
     /(?:식단|메뉴|짜|구성|만들)/.test(String(task.message || ""))
@@ -248,8 +242,8 @@ async function classifyChatMutations(ruleFiles) {
   const result = await ask(
     systemPrompt(ruleFiles) +
       `\n\n사용자의 변경 요청을 실행 순서대로 하나 이상의 앱 기능으로 분류한다. 실제 변경은 하지 말고 아래 JSON만 반환한다.
-intent는 UPDATE_MEALS, GENERATE_WEEK, REGENERATE_RECIPES, ADD_RECIPE, DELETE_RECIPE, REGENERATE_GROCERY, ADD_GROCERY, DELETE_GROCERY, SET_GROCERY_PURCHASED, MANAGE_PANTRY, UPDATE_FAMILY, UPDATE_WEEKLY_REVIEW, UPDATE_PREFERENCE, UPDATE_ATTENDANCE, CLARIFY 중 하나다.
-식단이 없는 특정 주를 만들어 달라는 요청은 GENERATE_WEEK다. 월간 생성은 지원하지 않으며 월 전체 요청에는 주차를 물어보는 CLARIFY를 반환한다.
+intent는 UPDATE_MEALS, GENERATE_WEEK, REGENERATE_WEEK, REGENERATE_RECIPES, ADD_RECIPE, DELETE_RECIPE, REGENERATE_GROCERY, ADD_GROCERY, DELETE_GROCERY, SET_GROCERY_PURCHASED, MANAGE_PANTRY, UPDATE_FAMILY, UPDATE_WEEKLY_REVIEW, UPDATE_PREFERENCE, UPDATE_ATTENDANCE, CLARIFY 중 하나다.
+식단이 없는 특정 주를 만들어 달라는 요청은 GENERATE_WEEK, 이미 있는 주 전체를 다시 구성하라는 요청은 REGENERATE_WEEK다. 월간 생성은 지원하지 않으며 월 전체 요청에는 주차를 물어보는 CLARIFY를 반환한다.
 레시피 추가는 반드시 현재 식단에 있는 메뉴의 레시피를 보충하는 의미다. 레시피 삭제는 제목이 특정되어야 한다.
 냉장고·펜트리·보유 재료의 추가·수정·증감·삭제는 MANAGE_PANTRY다. 가족의 알레르기·씹기·매운맛·선호 메모 변경은 UPDATE_FAMILY다. 이번 주만 먹고 싶은 음식·피할 음식·주간 메모 저장은 UPDATE_WEEKLY_REVIEW다. 이 경우 지속 취향을 변경하지 않는다.
 구체적인 메뉴에 대해 앞으로 넣어줘·앞으로 빼줘·먹어봤어·생소해처럼 지속 취향이나 익숙함을 알려주면 UPDATE_PREFERENCE다. 식단 편성이나 레시피 존재로 취향을 추론하지 않는다. usage와 familiarity는 독립이며 사용자가 말한 필드만 포함한다. 가족 대상이 생략된 일반 요청은 family, 아기만 등의 명시가 있으면 해당 role이다. 오늘 메뉴·이것 등의 지시어는 현재 컨텍스트로 단일 메뉴를 식별할 수 없으면 CLARIFY다. 취향 저장만 요청했으면 UPDATE_MEALS를 추가하지 않는다. '잘 먹었어'만으로 ALLOW를 기록하지 않는다. 메뉴 구분은 현재 후보로 확인하고 여러 구분에 있으면 CLARIFY다.
@@ -263,7 +257,7 @@ intent는 UPDATE_MEALS, GENERATE_WEEK, REGENERATE_RECIPES, ADD_RECIPE, DELETE_RE
   );
   const classified = modelJson(result.content);
   const allowed = new Set([
-    "UPDATE_MEALS", "GENERATE_WEEK", "REGENERATE_RECIPES",
+    "UPDATE_MEALS", "GENERATE_WEEK", "REGENERATE_WEEK", "REGENERATE_RECIPES",
     "ADD_RECIPE", "DELETE_RECIPE", "REGENERATE_GROCERY", "ADD_GROCERY",
     "DELETE_GROCERY", "SET_GROCERY_PURCHASED", "MANAGE_PANTRY",
     "UPDATE_FAMILY", "UPDATE_WEEKLY_REVIEW", "UPDATE_PREFERENCE", "UPDATE_ATTENDANCE", "CLARIFY",
@@ -705,8 +699,25 @@ async function dispatchChatMutation(ruleFiles, decision) {
   if (decision.intent === "GENERATE_WEEK") {
     const week = decision.weekStart;
     if (context(week).meals?.length)
-      return { answer: `${week} 주차 식단은 이미 있습니다. 다시 구성하려면 주간 식단 화면의 ‘다시 구성’을 사용해 주세요.`, sources: [] };
+      return { answer: `${week} 주차 식단은 이미 있습니다. 기존 식단을 교체하려면 ‘이번 주 식단 다시 구성해줘’처럼 요청해 주세요.`, sources: [] };
     const payload = JSON.parse(ctl("generate-catalog-week", "--week", week));
+    publish("publish-new-week", writeInput("chat-week-" + week, payload), ["--week", week]);
+    return { answer: `${week}부터 일주일 식단을 생성했습니다. 레시피와 장보기는 별도로 준비해야 합니다.`, sources: [] };
+  }
+  if (decision.intent === "REGENERATE_WEEK") {
+    const week = decision.weekStart;
+    if (!validWeek(week))
+      return { answer: "다시 구성할 주차를 확인하지 못했습니다. 날짜를 알려주세요.", sources: [] };
+    const current = context(week);
+    if (current.meals?.length && current.meals.length !== 7)
+      return { answer: `${week} 주차는 일부 날짜만 저장되어 있어 전체를 자동으로 교체하지 않았습니다. 누락된 날짜를 먼저 확인해 주세요.`, sources: [] };
+    const payload = JSON.parse(ctl("generate-catalog-week", "--week", week, "--salt", String(Date.now())));
+    if (current.meals?.length) {
+      payload.expectedRevisions = Object.fromEntries(current.meals.map((meal) => [meal.date, meal.revision]));
+      const result = JSON.parse(publish("publish-days", writeInput("chat-regenerate-week-" + week, payload), []));
+      const missing = Object.values(result.missingByWeek ?? {}).flat();
+      return { answer: `${week}부터 일주일 식단을 다시 구성했습니다.${missing.length ? ` 레시피가 없는 메뉴 ${missing.length}개가 있어 장보기는 아직 미완료입니다.` : " 레시피와 장보기를 확인해 주세요."}`, sources: [] };
+    }
     publish("publish-new-week", writeInput("chat-week-" + week, payload), ["--week", week]);
     return { answer: `${week}부터 일주일 식단을 생성했습니다. 레시피와 장보기는 별도로 준비해야 합니다.`, sources: [] };
   }
@@ -887,7 +898,7 @@ async function runChat() {
   }
   const current = context(task.weekStart);
   const result = await ask(
-    systemPrompt(ruleFiles) + "\n\n이번 작업은 읽기 전용 채팅이다. 데이터 변경 요청은 수행하지 말고 앱의 식단 수정 기능으로 안내한다. 칼로리는 정확한 중량이 없으면 추정 범위와 가정을 밝힌다. JSON: {\"answer\":\"한국어 답변\",\"sources\":[{\"title\":\"출처\",\"url\":\"https://...\"}]}",
+    systemPrompt(ruleFiles) + "\n\n이번 질문에는 저장할 변경이 명시되지 않았다. 현재 데이터를 설명하고, 변경을 원한다면 대상 날짜와 내용을 구체적으로 요청할 수 있다고 안내한다. 이 응답에서는 데이터를 저장하지 않는다. 칼로리는 정확한 중량이 없으면 추정 범위와 가정을 밝힌다. JSON: {\"answer\":\"한국어 답변\",\"sources\":[{\"title\":\"출처\",\"url\":\"https://...\"}]}",
     "[현재 주 컨텍스트]\n" + JSON.stringify(current) + "\n[대화 기록]\n" + JSON.stringify(task.conversation || []) + "\n[질문]\n" + task.message,
     true,
     3,
