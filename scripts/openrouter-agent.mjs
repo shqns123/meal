@@ -7,6 +7,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { selectedMutationMonth } from "../lib/agent-request-utils.mjs";
 import { assertReviewDates } from "../lib/review-scope.mjs";
 import { requestsMealDataChange, requestsSelectedWeekRegeneration } from "../lib/chat-mutation-intent.mjs";
@@ -103,8 +104,7 @@ async function ask(system, user, search = false, searchBudget = 12) {
 function systemPrompt(ruleFiles) {
   return [
     "당신은 가족 식단 앱의 자동 게시 작업자입니다. 설명 없이 유효한 JSON 객체만 반환합니다.",
-    "레시피가 필요하면 반드시 OpenRouter 웹 검색과 웹 본문 읽기를 먼저 사용한다. 메뉴명과 일치하는 만개의레시피의 개별 레시피 페이지를 실제로 열고, 그 페이지의 재료명·재료량·인분·조리 순서를 확인한 뒤에만 sourceUrl, sourceTitle, sourceAuthor, sourceCheckedAt을 넣는다. sourceUrl은 https://www.10000recipe.com/recipe/{숫자} 또는 같은 형태의 모바일 주소여야 하며 검색 결과·카테고리 페이지 URL은 저장하지 않는다. URL을 추측하거나 만들지 않는다.",
-    "만개의레시피 원문의 재료와 분량을 가족의 실제 식사 인원에 맞게 환산하고 단위를 구조화한다. 원문 문장과 이미지는 복사하지 말고 조리 순서를 의미가 유지되는 범위에서 다시 작성한다. 정확한 세부메뉴와 일치하는 개별 레시피를 찾지 못하면 비슷한 메뉴로 대체하지 말고 출처 검증 실패로 남긴다.",
+    "레시피 검색과 조회는 카탈로그 SQLite DB에서만 수행한다. AI가 레시피 재료·분량·조리 순서·출처 URL을 생성하거나 추측하지 않는다. DB에 없는 메뉴는 찾지 못했다고 알리고 장보기 완료로 보고하지 않는다.",
     "입력 컨텍스트의 outputContract를 정확히 지키고, 수량은 숫자와 단위로, 조리 단계는 '1. '부터 시작한다. 브로콜리·파프리카·피망은 재료뿐 아니라 메뉴명·출처 제목·메모를 포함한 저장 JSON 어디에도 넣지 않는다. 같은 주의 같은 재료는 반드시 한 가지 단위만 사용한다(예: 당근은 모두 g, 애호박은 모두 g).",
     "dishPreferences의 lastPlannedAt은 해당 메뉴가 식단에 마지막으로 편성된 날짜다. 새 식단을 만들 때 최근 편성 메뉴의 반복 간격을 판단하는 참고 자료로 사용하되, 허용 여부·알레르기·사용자 요청보다 우선하지 않는다.",
     "menuCatalog는 만개의레시피에서 수집한 식사형태·조리계열·기본 메뉴·세부 메뉴 계층이다. selectionPreview는 AVOID 메뉴를 제외하고 ALLOW와 UNKNOWN 세부메뉴를 대상으로 최근 식단을 반영해 고른 후보이다. UNKNOWN은 미확인 상태 그대로 저장할 수 있으며 ALLOW로 추정하지 않는다. 기본 메뉴별 동일한 기본 확률과 세부 메뉴 30일·기본 메뉴 10~14일·유사메뉴그룹 5~8일·조리계열/주재료 2일 쿨다운을 참고한다. 주간 완성본에서는 이름만 다른 비슷한 주찬의 근접 반복, 조리법·주재료의 3일 연속 반복과 주간 쏠림을 피한다. 부찬 조합을 2~3일 유지하는 것은 의도된 반복이다.",
@@ -375,21 +375,23 @@ async function runChatMealChange(ruleFiles) {
   const publishResult = JSON.parse(String(publish("publish-days", writeInput("chat-days", combinedPayload), [])));
   const weeks = [...new Set(dates.map(sundayForDate))];
   const failedRecipeWeeks = [];
+  const missingCatalogRecipes = [];
   for (const weekStart of weeks) {
     try {
-      await generateWeekRecipes(
+      const lookup = await generateWeekRecipes(
         ruleFiles,
         weekStart,
         `${dates.filter((date) => sundayForDate(date) === weekStart).join(", ")} 변경 메뉴의 레시피를 보충하고 기존에 검증된 레시피는 재사용한다.`,
       );
+      missingCatalogRecipes.push(...(lookup.missing || []));
     } catch (error) {
       failedRecipeWeeks.push(weekStart);
       console.warn("Meal changes were saved but recipe refresh failed:", error instanceof Error ? error.message : error);
     }
   }
   const recipeStatus = failedRecipeWeeks.length
-    ? `식단은 모두 저장했지만 ${failedRecipeWeeks.join(", ")} 주차의 레시피와 장보기 갱신은 완료하지 못했습니다.`
-    : "관련 레시피와 장보기도 다시 계산했습니다.";
+    ? `식단은 저장했지만 ${failedRecipeWeeks.join(", ")} 주차의 DB 레시피 조회는 완료하지 못했습니다. 장보기도 별도 확인이 필요합니다.`
+    : `카탈로그 DB의 레시피가 화면에 표시됩니다.${missingCatalogRecipes.length ? ` DB에 없는 메뉴: ${[...new Set(missingCatalogRecipes)].join(", ")}.` : ""} 장보기는 별도 확인이 필요합니다.`;
   return {
     answer: `${String(requested.answer || "").trim() || `${dates.join(", ")} 식단을 변경했습니다.`} ${recipeStatus}`
       + (publishResult.overallQuality?.highWarnings?.length
@@ -423,48 +425,39 @@ function recipeRequirement(current, title, requestedDates = []) {
   };
 }
 
-async function generateWeekRecipes(ruleFiles, weekStart, instruction) {
+async function generateWeekRecipes(_ruleFiles, weekStart, _instruction, targetTitle = null) {
   if (!validWeek(weekStart))
-    return { answer: "레시피를 만들 주차를 확인하지 못했습니다.", sources: [] };
+    return { answer: "레시피를 조회할 주차를 확인하지 못했습니다.", sources: [] };
   const current = context(weekStart);
   if (!current.meals?.length)
     return { answer: `${weekStart} 주차에는 저장된 식단이 없습니다.`, sources: [] };
-  const modelContext = compactPlannerContext(current);
-  const reuseInstruction = current.reusableRecipes?.length
-    ? "\n[재사용 규칙]\n컨텍스트의 reusableRecipes는 SQLite에서 검증된 정확히 같은 메뉴다. 이 레시피는 다시 검색하지 말고 그대로 포함하며, 누락된 메뉴만 검색한다."
-    : "";
-  const searchBudget = Math.min(
-    20,
-    Math.max(4, 22 - (current.reusableRecipes?.length || 0)),
-  );
-  const scope =
-    "주간 식단 메뉴는 바꾸지 않는다. mealChanges는 빈 배열이다. 선택 주의 저녁 주찬·부찬과 집에서 먹는 주말 점심 레시피를 빠짐없이 준비한다. " +
-    instruction;
-  const result = await ask(
-    systemPrompt(ruleFiles),
-    `[주간 컨텍스트]\n${JSON.stringify(modelContext)}\n[사용자 요청]\n${task.message || task.prompt || instruction}\n[작업 범위]\n${scope}${reuseInstruction}\nmeal-week.v1 JSON만 반환한다.`,
-    true,
-    searchBudget,
-  );
-  let payload = mergeReusableRecipes(modelJson(result.content), current);
-  payload = await completePayload(
-    payload,
-    modelContext,
-    ruleFiles,
-    scope,
-    (candidate) => validate("validate-week", candidate, ["--week", weekStart]),
-    true,
-    searchBudget,
-  );
-  payload.expectedRevisions = Object.fromEntries(current.meals.map((meal) => [meal.date, meal.revision]));
-  publish(
-    "publish-recipes",
-    writeInput(`chat-recipes-${weekStart}`, payload),
-    ["--week", weekStart],
-  );
+  const names = new Set();
+  for (const meal of current.meals) {
+    if (!meal.dinnerDiningOut) {
+      for (const name of [meal.main, meal.soup, ...(meal.sides || [])])
+        if (name) names.add(name);
+    }
+    if ([0, 6].includes(new Date(`${meal.date}T00:00:00Z`).getUTCDay()) && meal.lunch && meal.lunch !== "회사 식사")
+      names.add(meal.lunch);
+  }
+  const wanted = targetTitle ? [targetTitle] : [...names];
+  const catalogPath = process.env.MEAL_CATALOG_DB_PATH ?? path.join(root, "data", "10000recipe-catalog.db");
+  if (!fs.existsSync(catalogPath))
+    return { answer: "레시피 카탈로그 DB를 찾지 못했습니다. 서버의 카탈로그 초기화를 확인해 주세요.", sources: [] };
+  const catalog = new DatabaseSync(catalogPath, { readOnly: true });
+  let found;
+  try {
+    if (!catalog.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='RecipeCatalogRecipe'").get())
+      return { answer: "레시피 카탈로그 DB에 레시피 본문이 없습니다. 서버의 카탈로그 초기화를 확인해 주세요.", sources: [] };
+    const find = catalog.prepare('SELECT "variantName", "sourceTitle", "sourceUrl" FROM "RecipeCatalogRecipe" WHERE "variantName"=?');
+    found = wanted.map((name) => find.get(name)).filter(Boolean);
+  } finally { catalog.close(); }
+  const missing = wanted.filter((name) => !found.some((row) => row.variantName === name));
+  const dateLabel = targetTitle ? `${targetTitle} 레시피` : `${weekStart} 주차 레시피`;
   return {
-    answer: `${weekStart} 주차의 식단에 맞춰 레시피를 저장했습니다. 식단 메뉴는 변경하지 않았습니다.`,
-    sources: citations(result.annotations),
+    answer: `${dateLabel}를 AI 검색 없이 카탈로그 DB에서 조회했습니다. ${found.length}/${wanted.length}개를 레시피 화면에서 볼 수 있습니다.${missing.length ? ` DB에 없는 메뉴: ${missing.join(", ")}.` : ""} 식단과 장보기 데이터는 변경하지 않았습니다.`,
+    sources: found.slice(0, 10).map((row) => ({ title: row.sourceTitle, url: row.sourceUrl })),
+    missing,
   };
 }
 
@@ -548,6 +541,7 @@ async function runChatRecipeAction(ruleFiles, decision) {
       ruleFiles,
       weekStart,
       `${requirement.title}(${requirement.category})의 ${requirement.plannedDates.join(", ")} 레시피를 반드시 보충한다.`,
+      requirement.title,
     );
   }
   return generateWeekRecipes(
@@ -938,11 +932,19 @@ async function runChat() {
     return;
   }
   const current = context(task.weekStart);
+  if (/(레시피|만드는 법|조리법|요리법)/.test(task.message)) {
+    const names = current.meals?.flatMap((meal) => [meal.main, meal.soup, ...(meal.sides || []), meal.lunch].filter(Boolean)) || [];
+    const target = [...new Set(names)].find((name) => task.message.includes(name)) || null;
+    const lookup = await generateWeekRecipes(ruleFiles, task.weekStart, task.message, target);
+    publish("reply-chat", writeInput("chat-" + task.requestId, lookup), ["--id", task.requestId]);
+    notify();
+    return;
+  }
   const result = await ask(
     systemPrompt(ruleFiles) + "\n\n이번 질문에는 저장할 변경이 명시되지 않았다. 현재 데이터를 설명하고, 변경을 원한다면 대상 날짜와 내용을 구체적으로 요청할 수 있다고 안내한다. 이 응답에서는 데이터를 저장하지 않는다. 칼로리는 정확한 중량이 없으면 추정 범위와 가정을 밝힌다. JSON: {\"answer\":\"한국어 답변\",\"sources\":[{\"title\":\"출처\",\"url\":\"https://...\"}]}",
     "[현재 주 컨텍스트]\n" + JSON.stringify(current) + "\n[대화 기록]\n" + JSON.stringify(task.conversation || []) + "\n[질문]\n" + task.message,
-    true,
-    3,
+    false,
+    0,
   );
   const payload = modelJson(result.content);
   if (!String(payload.answer || "").trim())
@@ -954,6 +956,8 @@ async function runChat() {
 }
 
 async function runPlanner() {
+  if (task.action === "REGENERATE_RECIPES")
+    throw new Error("레시피 AI 재생성은 종료되었습니다. 레시피 화면에서 카탈로그 DB를 조회해 주세요.");
   if (task.action === "PUBLISH_WEEK") {
     const current = context(task.weekStart);
     if (current.meals?.length)
@@ -1030,15 +1034,15 @@ async function runPlanner() {
     }), []);
     let summary = String(payload.changeReason || "주간 점검 결과 식단을 조정했습니다.");
     try {
-      await generateWeekRecipes(
+      const lookup = await generateWeekRecipes(
         ruleFiles,
         task.weekStart,
         "주간 점검으로 변경된 메뉴의 레시피를 보충하고 검증된 기존 레시피는 재사용한다.",
       );
-      summary += " 관련 레시피와 장보기도 다시 계산했습니다.";
+      summary += ` 카탈로그 DB 레시피를 화면에서 조회할 수 있습니다.${lookup.missing?.length ? ` DB에 없는 메뉴: ${lookup.missing.join(", ")}.` : ""} 장보기는 별도 확인이 필요합니다.`;
     } catch (error) {
       console.warn("Weekly meals were saved but recipe refresh failed:", error instanceof Error ? error.message : error);
-      summary += " 식단은 저장했지만 레시피와 장보기 갱신은 완료하지 못했습니다.";
+      summary += " 식단은 저장했지만 DB 레시피 조회는 완료하지 못했습니다. 장보기도 별도 확인이 필요합니다.";
     }
     ctl("record-review", "--week", task.weekStart, "--summary", summary, "--request-id", task.requestId, "--changed", "true");
     notify(); return;

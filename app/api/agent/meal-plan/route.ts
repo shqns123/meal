@@ -52,6 +52,12 @@ export async function POST(request: Request) {
   if (validationError)
     return NextResponse.json({ error: validationError }, { status: 400 });
 
+  if (body.action === "REGENERATE_RECIPES")
+    return NextResponse.json(
+      { error: "레시피는 카탈로그 DB에서 직접 조회합니다. 레시피 화면의 날짜를 선택하고 새로고침해 주세요." },
+      { status: 400 },
+    );
+
   if (!openRouterConfigured())
     return NextResponse.json(
       {

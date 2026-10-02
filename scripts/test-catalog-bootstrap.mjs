@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { catalogCounts } from "./catalog-seed.mjs";
 
 const sourceRoot = process.cwd();
@@ -30,6 +31,18 @@ try {
   assert.equal(JSON.parse(second.stdout).created, false);
   assert.deepEqual(catalogCounts(catalogPath), counts);
   assert.equal(fs.statSync(catalogPath).mtimeMs, before);
+  const legacy = new DatabaseSync(catalogPath);
+  legacy.exec('DROP TABLE "RecipeCatalogRecipe"');
+  legacy.close();
+  const merged = run();
+  assert.equal(merged.status, 0, merged.stderr);
+  assert.ok(JSON.parse(merged.stdout).recipesAdded > 0);
+  const upgraded = new DatabaseSync(catalogPath, { readOnly: true });
+  assert.ok(upgraded.prepare('SELECT COUNT(*) AS n FROM "RecipeCatalogRecipe"').get().n > 0);
+  upgraded.close();
+  const mergedAgain = run();
+  assert.equal(mergedAgain.status, 0, mergedAgain.stderr);
+  assert.equal(JSON.parse(mergedAgain.stdout).recipesAdded, 0);
   fs.writeFileSync(catalogPath, "잘못된 카탈로그 파일");
   const repaired = run();
   assert.equal(repaired.status, 0, repaired.stderr);

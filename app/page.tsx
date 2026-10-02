@@ -173,6 +173,7 @@ export default function Home() {
   const [selectedWeek, setSelectedWeek] = useState(() =>
     sundayFor(currentKstDate()),
   );
+  const [recipeDate, setRecipeDate] = useState("");
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [pendingJobs, setPendingJobs] = useState<PendingAgentJob[]>([]);
   const [pendingChats, setPendingChats] = useState<PendingAgentChat[]>([]);
@@ -180,9 +181,10 @@ export default function Home() {
   const pendingJobsLoaded = useRef(false);
   const pendingChatsLoaded = useRef(false);
   const currentWeek = sundayFor(currentKstDate());
+  const recipeWeek = recipeDate ? sundayFor(recipeDate) : currentWeek;
   const dataWeek =
     active === "레시피"
-      ? currentWeek
+      ? recipeWeek
       : selectedWeek;
 
   useEffect(() => {
@@ -455,14 +457,10 @@ export default function Home() {
           {active === "레시피" && (
             <Recipes
               recipes={recipes}
-              weekStart={currentWeek}
-              onRegenerate={() =>
-                setAgentRequest({
-                  action: "REGENERATE_RECIPES",
-                  weekStart: currentWeek,
-                  prompt: `${currentWeek}부터 ${addDaysLocal(currentWeek, 6)}까지의 식단 메뉴는 변경하지 말고, 이 주차의 주찬·부찬·필요한 주말 점심 레시피만 새로 생성해줘. 해당 주차에 속하지 않는 기존 레시피는 건드리지 말고, 각 메뉴마다 실제로 확인한 만개의레시피 개별 페이지를 근거로 정확한 분량, 번호 조리 순서, 아기 분리 조리, 보관 방법을 작성해 전체 주차 검증 후 게시해줘. 장보기는 이 요청에서 변경하지 마.`,
-                })
-              }
+              weekStart={recipeWeek}
+              selectedDate={recipeDate}
+              onSelectDate={setRecipeDate}
+              onRefresh={() => setRefreshVersion((version) => version + 1)}
             />
           )}
           {active === "장보기" && (
@@ -958,33 +956,59 @@ function WeekView({
 function Recipes({
   recipes,
   weekStart,
-  onRegenerate,
+  selectedDate,
+  onSelectDate,
+  onRefresh,
 }: {
   recipes: Recipe[];
   weekStart: string;
-  onRegenerate: () => void;
+  selectedDate: string;
+  onSelectDate: (date: string) => void;
+  onRefresh: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<"전체" | "주찬" | "부찬">("전체");
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
   const filtered = useMemo(
     () =>
-      recipes.filter(
-        (recipe) =>
-          (category === "전체" || recipe.category === category) &&
-          (recipe.title.includes(query) ||
-            recipe.tags.some((tag) => tag.includes(query))),
-      ),
-    [category, query, recipes],
+      recipes
+        .filter(
+          (recipe) =>
+            (!selectedDate || recipe.plannedDates.includes(selectedDate)) &&
+            (category === "전체" || recipe.category === category) &&
+            (recipe.title.includes(query) ||
+              recipe.tags.some((tag) => tag.includes(query))),
+        )
+        .sort((a, b) =>
+          (a.plannedDates[0] ?? "9999-12-31").localeCompare(b.plannedDates[0] ?? "9999-12-31")
+          || a.title.localeCompare(b.title, "ko"),
+        ),
+    [category, query, recipes, selectedDate],
   );
   return (
     <>
       <PageTitle label={`${formatWeekRange(weekStart)} 레시피`} title="레시피">
         <WeekActions
-          onRegenerate={onRegenerate}
-          regenerateLabel="이번 주 레시피 재생성"
+          onRegenerate={onRefresh}
+          regenerateLabel="레시피 DB 다시 조회"
         />
       </PageTitle>
+      <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
+        <label htmlFor="recipe-date" className="font-medium text-black/70">날짜 선택</label>
+        <input
+          id="recipe-date"
+          type="date"
+          value={selectedDate}
+          onChange={(event) => onSelectDate(event.target.value)}
+          className="h-11 rounded-lg border border-black/[.1] bg-white px-3 text-black focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+        />
+        {selectedDate && (
+          <button type="button" onClick={() => onSelectDate("")} className="h-11 rounded-lg px-3 text-[#0075de] hover:bg-[#e6f3fe] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40">
+            이번 주 전체 보기
+          </button>
+        )}
+        <span className="text-black/55">선택한 식단에 연결된 DB 레시피를 날짜순으로 표시합니다.</span>
+      </div>
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div
           className="inline-flex w-fit rounded-lg border border-black/[.1] bg-white p-1"
@@ -1074,7 +1098,7 @@ function Recipes({
       </div>
       {!filtered.length && (
         <p className="rounded-xl border border-dashed border-black/[.12] p-8 text-center text-sm text-black/55">
-          표시할 {category === "전체" ? "레시피" : category}이 없습니다.
+          {selectedDate ? `${selectedDate}에 표시할` : "표시할"} {category === "전체" ? "레시피" : category}이 없습니다. 날짜나 검색어를 바꿔 보세요.
         </p>
       )}
       {selectedRecipe && (
@@ -1121,6 +1145,11 @@ function RecipeModal({ recipe, close }: { recipe: Recipe; close: () => void }) {
         {recipe.description && (
           <p className="mt-5 text-sm leading-6 text-black/70">
             {recipe.description}
+          </p>
+        )}
+        {String(recipe.id).startsWith("catalog-") && (
+          <p className="mt-3 rounded-lg bg-[#fff0d4] px-3 py-2 text-sm leading-6 text-black/75">
+            원문 분량입니다. 가족 인원에 맞춘 양과 알레르기·금지 재료, 아기 몫 분리 및 보관 방법은 조리 전에 확인해 주세요. 이 레시피는 장보기에 자동 합산되지 않습니다.
           </p>
         )}
         <section className="mt-6">
