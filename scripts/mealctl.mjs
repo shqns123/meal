@@ -12,6 +12,7 @@ import {
   requiresLunchRecipe,
 } from "../lib/recipe-coverage.mjs";
 import { chooseCatalogMenu, flattenCatalog } from "../lib/catalog-selection.mjs";
+import { REVIEW_UNIT, scaleCatalogRecipe } from "../lib/catalog-shopping.mjs";
 import { assessMealDiversity } from "../lib/meal-diversity.mjs";
 import { assessFinalMealQuality } from "../lib/final-meal-quality.mjs";
 import {
@@ -52,6 +53,7 @@ if (
     "publish-days",
     "rebuild-shopping",
     "delete-recipe",
+    "delete-recipe-cards",
     "manage-grocery",
     "manage-pantry",
     "manage-family",
@@ -102,6 +104,7 @@ function usage() {
   node scripts/mealctl.mjs publish-days --input /path/days.json
   node scripts/mealctl.mjs rebuild-shopping --week YYYY-MM-DD [--request-id ID]
   node scripts/mealctl.mjs delete-recipe --week YYYY-MM-DD [--title "recipe title" | --all true] [--category CATEGORY] [--date YYYY-MM-DD]
+  node scripts/mealctl.mjs delete-recipe-cards --input /path/selected-cards.json
   node scripts/mealctl.mjs manage-grocery --week YYYY-MM-DD --input /path/action.json
   node scripts/mealctl.mjs manage-pantry --input /path/action.json
   node scripts/mealctl.mjs manage-family --input /path/action.json
@@ -547,9 +550,6 @@ function loadMonthContext(month, seedSalt = "") {
 }
 
 const banned = [
-  "브로콜리",
-  "파프리카",
-  "피망",
   ...db
     .prepare('SELECT "allergies" FROM "FamilyMember" WHERE TRIM("allergies")<>\'\'')
     .all()
@@ -604,23 +604,6 @@ function mealStyleFor(change, current = "MAIN_DISH") {
     ? String(change.mealStyle || "")
     : current || "MAIN_DISH";
 }
-const basicStock = new Set([
-  "쌀",
-  "밥",
-  "김치",
-  "깍두기",
-  "소금",
-  "설탕",
-  "간장",
-  "식초",
-  "고춧가루",
-  "고추장",
-  "된장",
-  "참기름",
-  "식용유",
-  "다진 마늘",
-  "후추",
-]);
 function validatePayload(
   payload,
   weekStart,
@@ -1432,7 +1415,6 @@ function calculateShopping(recipes, weekStart) {
   for (const recipe of recipes)
     for (const ingredient of recipe.ingredients) {
       const name = normalizeName(ingredient.name);
-      if (basicStock.has(name)) continue;
       const key = `${name}|${ingredient.unit}`;
       const current = totals.get(key) ?? {
         name,
@@ -1440,21 +1422,26 @@ function calculateShopping(recipes, weekStart) {
         unit: ingredient.unit,
         category: ingredient.category ?? "기타",
         uses: [],
+        notes: [],
       };
-      current.quantity += Number(ingredient.quantity);
+      if (ingredient.unit === REVIEW_UNIT) {
+        current.quantity = 1;
+        if (ingredient.quantityNote) current.notes.push(ingredient.quantityNote);
+      } else current.quantity += Number(ingredient.quantity);
       for (const date of recipe.plannedDates)
         current.uses.push(`${date.slice(5)} ${recipe.title}`);
       totals.set(key, current);
     }
   return [...totals.entries()]
     .map(([key, item]) => {
-      const ownedQuantity = Math.min(
+      const ownedQuantity = item.unit === REVIEW_UNIT ? 0 : Math.min(
         Number(pantry.get(key) ?? 0),
         item.quantity,
       );
       return {
         ...item,
-        quantity: round(item.quantity - ownedQuantity),
+        quantityNote: item.unit === REVIEW_UNIT ? [...new Set(item.notes)].join("; ").slice(0, 1000) : null,
+        quantity: round(item.quantity),
         requiredQuantity: round(item.quantity),
         ownedQuantity: round(ownedQuantity),
         usePlan: [...new Set(item.uses)].sort().join(" · "),
@@ -1626,12 +1613,12 @@ function writeShopping(weekStart, recipes, now) {
   );
   const manualItems = db
     .prepare(
-      'SELECT "id","name","quantity","unit","category","ownedQuantity","usePlan","purchased" FROM "ShoppingItem" WHERE "weekId"=? AND "usePlan"=?',
+      'SELECT "id","name","quantity","unit","quantityNote","category","ownedQuantity","usePlan","purchased" FROM "ShoppingItem" WHERE "weekId"=? AND "usePlan"=?',
     )
     .all(weekRow.id, "직접 추가");
   db.prepare('DELETE FROM "ShoppingItem" WHERE "weekId"=?').run(weekRow.id);
   const insertShopping = db.prepare(
-    'INSERT INTO "ShoppingItem" ("id","name","quantity","unit","category","ownedQuantity","usePlan","purchased","weekId") VALUES (?,?,?,?,?,?,?,?,?)',
+    'INSERT INTO "ShoppingItem" ("id","name","quantity","unit","quantityNote","category","ownedQuantity","usePlan","purchased","weekId") VALUES (?,?,?,?,?,?,?,?,?,?)',
   );
   for (const item of shopping)
     insertShopping.run(
@@ -1639,6 +1626,7 @@ function writeShopping(weekStart, recipes, now) {
       item.name,
       item.quantity,
       item.unit,
+      item.quantityNote,
       item.category,
       item.ownedQuantity,
       item.usePlan,
@@ -1653,6 +1641,7 @@ function writeShopping(weekStart, recipes, now) {
       item.name,
       item.quantity,
       item.unit,
+      item.quantityNote,
       item.category,
       item.ownedQuantity,
       item.usePlan,
@@ -2062,13 +2051,13 @@ function rebuildShopping(weekStart, requestId = null) {
     action: "REGENERATE_GROCERY",
     now,
   });
-  const missing = missingStoredCoverage(weekStart);
+  const { recipes, missing, issues } = shoppingRecipesFromDatabases(weekStart);
   if (missing.length) {
-    const error = `레시피가 아직 준비되지 않은 메뉴가 있습니다: ${missing.join(", ")}`;
+    const error = `재료 목록을 찾지 못했거나 가족 알레르기 재료가 있는 메뉴가 있습니다: ${missing.join(", ")}`;
     db.prepare(
       'UPDATE "AgentJob" SET "status"=?,"error"=?,"completedAt"=? WHERE "id"=?',
     ).run("FAILED", error, Date.now(), jobId);
-    printJson({ success: false, jobId, weekStart, missing });
+    printJson({ success: false, jobId, weekStart, missing, issues });
     process.exitCode = 2;
     return;
   }
@@ -2081,12 +2070,12 @@ function rebuildShopping(weekStart, requestId = null) {
   fs.copyFileSync(dbPath, backupPath);
   try {
     db.exec("BEGIN IMMEDIATE");
-    const shopping = writeShopping(weekStart, storedRecipes(weekStart), now);
+    const shopping = writeShopping(weekStart, recipes, now);
     db.prepare(
       'UPDATE "AgentJob" SET "status"=?,"summary"=?,"completedAt"=? WHERE "id"=?',
     ).run(
       "COMPLETED",
-      JSON.stringify({ shoppingItems: shopping.length, backup: backupPath }),
+      JSON.stringify({ shoppingItems: shopping.length, reviewItems: shopping.filter((item) => item.quantityNote).length, backup: backupPath }),
       Date.now(),
       jobId,
     );
@@ -2096,6 +2085,7 @@ function rebuildShopping(weekStart, requestId = null) {
       jobId,
       weekStart,
       shoppingItems: shopping.length,
+      reviewItems: shopping.filter((item) => item.quantityNote).length,
       backup: backupPath,
     });
   } catch (error) {
@@ -2107,6 +2097,94 @@ function rebuildShopping(weekStart, requestId = null) {
     ).run("FAILED", String(error.message ?? error), Date.now(), jobId);
     throw error;
   }
+}
+
+function shoppingRecipesFromDatabases(weekStart) {
+  const end = addDays(weekStart, 7);
+  const plans = db.prepare('SELECT * FROM "MealPlan" WHERE "date">=? AND "date"<? ORDER BY "date"').all(toMillis(weekStart), toMillis(end));
+  if (!plans.length) return { recipes: [], missing: [`${weekStart}~${addDays(weekStart, 6)} 식단 없음`], issues: { week: "식단이 없어 기존 장보기 목록을 유지했습니다." } };
+  const missingStored = new Set(missingStoredCoverage(weekStart));
+  const requirements = [];
+  const schedules = db.prepare(`SELECT s."date",s."isWorking",s."eatsAtCompany",s."isAway",s."lunchNotAtHome",s."dinnerNotAtHome",m."role"
+    FROM "FamilySchedule" s JOIN "FamilyMember" m ON m."id"=s."memberId" WHERE s."date">=? AND s."date"<?`)
+    .all(toMillis(weekStart), toMillis(end));
+  const attendance = new Map();
+  for (const row of schedules) {
+    const date = formatKst(row.date);
+    const roles = attendance.get(date) ?? new Map();
+    roles.set(row.role, row);
+    attendance.set(date, roles);
+  }
+  const portionFor = (plan, date, meal) => {
+    const roles = attendance.get(date) ?? new Map();
+    const away = (role) => {
+      const value = roles.get(role);
+      return value && (value.isAway || (meal === "lunch"
+        ? value.lunchNotAtHome || (value.isWorking && value.eatsAtCompany)
+        : value.dinnerNotAtHome));
+    };
+    const adults = Math.max(0, Number(plan.adultServings ?? 2) - Number(Boolean(away("father"))) - Number(Boolean(away("mother"))));
+    const child = plan.babyMenu ? 0 : Math.max(0, Number(plan.childServings ?? 1) - Number(Boolean(away("child"))));
+    return adults + child * 0.5;
+  };
+  for (const plan of plans) {
+    const date = formatKst(plan.date);
+    const dinnerPortions = portionFor(plan, date, "dinner");
+    if (!plan.dinnerDiningOut && dinnerPortions > 0) {
+      for (const title of [plan.mainDish, plan.soupDish])
+        if (title) requirements.push({ date, title, category: "주찬", portions: dinnerPortions });
+      for (const title of parseJsonList(plan.sideDishes))
+        requirements.push({ date, title, category: "부찬", portions: dinnerPortions });
+    }
+    if (requiresLunchRecipe(plan.lunchPlan, new Date(`${date}T00:00:00Z`).getUTCDay())) {
+      const lunchPortions = portionFor(plan, date, "lunch");
+      if (lunchPortions > 0)
+        requirements.push({ date, title: plan.lunchPlan, category: "점심", portions: lunchPortions });
+    }
+  }
+  const keyFor = ({ date, title, category }) => `${date} · ${title} (${category})`;
+  const required = new Set(requirements.map(keyFor));
+  const existing = storedRecipes(weekStart, { skipInvalid: true }).map((recipe) => {
+    const category = recipe.category === "반찬" ? "부찬" : recipe.category;
+    const dates = recipe.plannedDates.filter((date) => required.has(keyFor({ date, title: recipe.title, category }))
+      && !missingStored.has(keyFor({ date, title: recipe.title, category })));
+    const factor = dates.length / Math.max(1, recipe.plannedDates.length);
+    return { ...recipe, plannedDates: dates, ingredients: recipe.ingredients.map((item) => ({ ...item, quantity: item.quantity * factor })) };
+  }).filter((recipe) => recipe.plannedDates.length);
+  const uncovered = requirements.filter((item) => missingStored.has(keyFor(item)));
+  const grouped = new Map();
+  for (const item of uncovered) {
+    const key = `${item.category}\u0000${item.title}`;
+    const group = grouped.get(key) ?? { title: item.title, category: item.category, dates: [], portions: 0 };
+    // A hidden recipe card is a display preference; the meal still needs its ingredients.
+    if (!group.dates.includes(item.date)) {
+      group.dates.push(item.date);
+      group.portions += item.portions;
+    }
+    grouped.set(key, group);
+  }
+  const catalogRecipes = [];
+  const resolved = new Set();
+  const issues = {};
+  if (grouped.size && fs.existsSync(catalogPath)) {
+    const catalog = new DatabaseSync(catalogPath, { readOnly: true });
+    try {
+      const hasRecipes = catalog.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='RecipeCatalogRecipe'").get();
+      if (hasRecipes) {
+        const find = catalog.prepare('SELECT "variantName","servingsText","sourceUrl","ingredientGroups" FROM "RecipeCatalogRecipe" WHERE "variantName"=?');
+        for (const group of grouped.values()) {
+          if (!group.dates.length) continue;
+          const row = find.get(group.title);
+          if (!row) { issues[group.title] = "카탈로그 DB에 정확히 일치하는 레시피가 없습니다."; continue; }
+          const scaled = scaleCatalogRecipe(row, group.portions, banned);
+          if (!scaled.ingredients) { issues[group.title] = scaled.reason; continue; }
+          catalogRecipes.push({ title: group.title, category: group.category, plannedDates: group.dates.sort(), ingredients: scaled.ingredients });
+          for (const date of group.dates) resolved.add(keyFor({ date, title: group.title, category: group.category }));
+        }
+      }
+    } finally { catalog.close(); }
+  }
+  return { recipes: [...existing, ...catalogRecipes], missing: [...missingStored].filter((item) => !resolved.has(item)), issues };
 }
 
 function backupDatabase(label) {
@@ -2326,6 +2404,101 @@ function deleteRecipeForChat(weekStart, title, category = null, date = null, del
       shoppingItems: shopping.length,
       backup: backupPath,
     });
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+}
+
+function deleteRecipeCards(payload) {
+  const startDate = String(payload?.startDate ?? "");
+  const endDate = String(payload?.endDate ?? "");
+  const cards = payload?.cards;
+  if (!isRealDate(startDate) || !isRealDate(endDate) || endDate < startDate ||
+    (toMillis(endDate) - toMillis(startDate)) / 86_400_000 >= 93)
+    fail("삭제할 기간은 시작일 이후 최대 93일 이내여야 합니다.");
+  if (!Array.isArray(cards) || cards.length < 1 || cards.length > 100)
+    fail("삭제할 레시피 카드를 1~100개 선택해 주세요.");
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='HiddenRecipeCard'").get())
+    fail("레시피 카드 숨김 테이블이 없습니다. Prisma DB 구조를 먼저 적용해 주세요.");
+  const stored = db.prepare('SELECT "id","title","plannedDates" FROM "Recipe" WHERE "id"=?');
+  const meals = db.prepare('SELECT "mainDish","soupDish","sideDishes","lunchPlan","dinnerDiningOut" FROM "MealPlan" WHERE "date"=?');
+  let catalog = null;
+  const validated = [];
+  const seen = new Set();
+  try {
+    for (const card of cards) {
+      const id = String(card?.id ?? "");
+      const title = String(card?.title ?? "").trim();
+      const dates = card?.plannedDates;
+      if (!id || !title || title.length > 120 || !Array.isArray(dates) || !dates.length)
+        fail("선택한 레시피 카드의 ID, 이름 또는 날짜가 올바르지 않습니다.");
+      if (seen.has(id)) fail("같은 레시피 카드를 중복 선택했습니다.");
+      seen.add(id);
+      const uniqueDates = [...new Set(dates)];
+      if (uniqueDates.length !== dates.length || uniqueDates.some((date) =>
+        !isRealDate(date) || date < startDate || date > endDate))
+        fail("선택한 레시피 카드의 날짜가 조회 기간을 벗어났습니다.");
+      if (id.startsWith("catalog-")) {
+        if (!fs.existsSync(catalogPath)) fail("레시피 카탈로그 DB가 없습니다.");
+        catalog ??= new DatabaseSync(catalogPath, { readOnly: true });
+        const row = catalog.prepare('SELECT "variantName" FROM "RecipeCatalogRecipe" WHERE "id"=?').get(id.slice(8));
+        if (!row || row.variantName !== title) fail(`카탈로그에서 '${title}' 레시피를 확인하지 못했습니다.`);
+        for (const date of uniqueDates) {
+          const day = new Date(`${date}T00:00:00Z`).getUTCDay();
+          const matched = meals.all(toMillis(date)).some((meal) =>
+            (!meal.dinnerDiningOut && [meal.mainDish, meal.soupDish, ...parseJsonList(meal.sideDishes)].includes(title)) ||
+            ([0, 6].includes(day) && meal.lunchPlan === title));
+          if (!matched) fail(`${date} 식단에서 '${title}' 메뉴를 찾지 못했습니다.`);
+        }
+        validated.push({ kind: "catalog", id, title, dates: uniqueDates });
+      } else {
+        const row = stored.get(id);
+        if (!row || row.title !== title) fail(`저장된 '${title}' 레시피를 찾지 못했습니다.`);
+        const planned = parseJsonList(row.plannedDates);
+        if (uniqueDates.some((date) => !planned.includes(date)))
+          fail(`'${title}' 레시피의 저장 날짜가 변경됐습니다. 다시 조회해 주세요.`);
+        validated.push({ kind: "stored", id, title, dates: uniqueDates, planned });
+      }
+    }
+  } finally { catalog?.close(); }
+  if (db.prepare('PRAGMA quick_check').get()?.quick_check !== "ok")
+    fail("DB 무결성 검사에 실패하여 레시피 카드를 삭제하지 않았습니다.");
+  const backupPath = backupDatabase("recipe-cards-delete");
+  const now = Date.now();
+  const affectedWeeks = new Set();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const hide = db.prepare('INSERT OR IGNORE INTO "HiddenRecipeCard" ("id","title","date","createdAt") VALUES (?,?,?,?)');
+    const unlink = db.prepare('UPDATE "MealPlan" SET "recipeId"=NULL,"updatedAt"=? WHERE "recipeId"=? AND "date"=?');
+    const trim = db.prepare('UPDATE "Recipe" SET "plannedDates"=?,"weekKeys"=?,"updatedAt"=? WHERE "id"=?');
+    const remove = db.prepare('DELETE FROM "Recipe" WHERE "id"=?');
+    for (const card of validated) {
+      if (card.kind === "stored") {
+        const latest = stored.get(card.id);
+        if (!latest || latest.title !== card.title || latest.plannedDates !== JSON.stringify(card.planned))
+          throw new Error(`'${card.title}' 레시피가 삭제 요청 중 변경됐습니다. 다시 조회해 주세요.`);
+      }
+      for (const date of card.dates) hide.run(crypto.randomUUID(), card.title, date, now);
+      if (card.kind !== "stored") continue;
+      const removed = new Set(card.dates);
+      const remaining = card.planned.filter((date) => !removed.has(date));
+      for (const date of card.dates) {
+        unlink.run(now, card.id, toMillis(date));
+        affectedWeeks.add(sundayFor(date));
+      }
+      if (remaining.length)
+        trim.run(JSON.stringify(remaining), JSON.stringify([...new Set(remaining.map(sundayFor))].sort()), now, card.id);
+      else remove.run(card.id);
+    }
+    const missingByWeek = {};
+    for (const week of affectedWeeks) {
+      writeShopping(week, storedRecipes(week, { skipInvalid: true }), now);
+      missingByWeek[week] = missingStoredCoverage(week);
+    }
+    db.exec("COMMIT");
+    printJson({ success: true, deleted: validated.length, hiddenDates: validated.reduce((total, card) => total + card.dates.length, 0),
+      shoppingWeeks: [...affectedWeeks].sort(), missingByWeek, backup: backupPath });
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}
     throw error;
@@ -2955,6 +3128,8 @@ try {
       flags.date,
       flags.all === "true",
     );
+  if (command === "delete-recipe-cards")
+    deleteRecipeCards(readPayload(flags.input));
   if (command === "manage-grocery")
     manageGroceryForChat(readPayload(flags.input), requireWeek(flags.week));
   if (command === "manage-pantry")

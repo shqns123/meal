@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { prisma } from "@/lib/prisma";
 import { missingRecipeCoverage } from "@/lib/recipe-coverage.mjs";
+import { scaleCatalogRecipe } from "@/lib/catalog-shopping.mjs";
 
 export const runtime = "nodejs";
 
@@ -11,9 +12,8 @@ export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
   const week = params.get("week") ?? "2026-08-30";
   const weekStart = new Date(`${week}T00:00:00+09:00`);
-  const weekEnd = new Date(weekStart);
-  weekEnd.setDate(weekEnd.getDate() + 7);
-  const [mealPlans, recipes, shoppingWeek] = await Promise.all([
+  const weekEnd = new Date(weekStart.getTime() + 7 * 86_400_000);
+  const [mealPlans, recipes, shoppingWeek, hiddenCards, familyMembers] = await Promise.all([
     prisma.mealPlan.findMany({
       where: { date: { gte: weekStart, lt: weekEnd } },
       orderBy: { date: "asc" },
@@ -27,11 +27,25 @@ export async function GET(request: Request) {
       where: { startDate: weekStart },
       include: { items: { orderBy: [{ usePlan: "asc" }, { name: "asc" }] } },
     }),
+    prisma.hiddenRecipeCard.findMany({
+      where: { date: { gte: week, lte: formatKst(new Date(weekEnd.getTime() - 86_400_000)) } },
+      select: { title: true, date: true },
+    }),
+    prisma.familyMember.findMany({ select: { allergies: true } }),
   ]);
-  const catalogRecipes = catalogRecipeCards(mealPlans, recipes, weekStart, weekEnd);
+  const banned = familyMembers.flatMap((member) =>
+    String(member.allergies ?? "").split(/[,/·\n]/).map((name) => name.trim()).filter((name) =>
+      name && !/^(없음|없어요|해당 없음)$/iu.test(name)));
+  const catalogRecipes = catalogRecipeCards(mealPlans, recipes, weekStart, weekEnd, banned);
+  const hidden = new Set(hiddenCards.map((card) => `${card.title}\u0000${card.date}`));
 
   return NextResponse.json({
-    groceryMissingRecipes: missingRecipeCoverage(mealPlans.filter(meal => meal.date >= weekStart && meal.date < weekEnd), recipes),
+    groceryMissingRecipes: missingRecipeCoverage(mealPlans.filter(meal => meal.date >= weekStart && meal.date < weekEnd), recipes).flatMap((entry) => {
+      const match = /^(\d{4}-\d{2}-\d{2}) · (.+) \((주찬|부찬|점심)\)$/u.exec(entry);
+      const catalogRecipe = match && catalogRecipes.find((recipe) => recipe.title === match[2] && recipe.plannedDates.includes(match[1]));
+      if (catalogRecipe && !catalogRecipe.shoppingBlockedReason) return [];
+      return [catalogRecipe?.shoppingBlockedReason ? `${entry} — ${catalogRecipe.shoppingBlockedReason}` : entry];
+    }),
     meals: mealPlans.map((meal, index) => ({
       date: formatKst(meal.date),
       day: Number(
@@ -95,10 +109,16 @@ export async function GET(request: Request) {
         storageMethod: recipe.storageMethod,
         consumeWithin: recipe.consumeWithin,
       };
-    }), ...catalogRecipes],
+    }), ...catalogRecipes]
+      .map((recipe) => ({
+        ...recipe,
+        plannedDates: recipe.plannedDates.filter((date) => !hidden.has(`${recipe.title}\u0000${date}`)),
+      }))
+      .filter((recipe) => recipe.plannedDates.length > 0),
     grocery: (shoppingWeek?.items ?? []).map((item) => ({
       id: item.id,
-      name: `${item.name} ${item.quantity}${item.unit}`,
+      name: item.quantityNote ? `${item.name} · 수량 확인 필요` : `${item.name} ${item.quantity}${item.unit}`,
+      quantityNote: item.quantityNote,
       category: item.category,
       done: item.purchased,
       usePlan: item.usePlan,
@@ -133,6 +153,7 @@ function catalogRecipeCards(
   storedRecipes: { title: string }[],
   weekStart: Date,
   weekEnd: Date,
+  banned: string[],
 ) {
   const required = new Map<string, { category: "주찬" | "부찬"; dates: Set<string> }>();
   const add = (title: string | null, category: "주찬" | "부찬", date: string) => {
@@ -199,6 +220,7 @@ function catalogRecipeCards(
         babySplitStep: null,
         storageMethod: null,
         consumeWithin: null,
+        shoppingBlockedReason: scaleCatalogRecipe(row, 1, banned).reason,
       };
     });
   } catch (error) {

@@ -74,6 +74,7 @@ type Grocery = {
   done: boolean;
   usePlan?: string;
   useDates?: string[];
+  quantityNote?: string | null;
 };
 type AgentRequest = {
   prompt: string;
@@ -173,19 +174,22 @@ export default function Home() {
   const [selectedWeek, setSelectedWeek] = useState(() =>
     sundayFor(currentKstDate()),
   );
-  const [recipeDate, setRecipeDate] = useState("");
+  const [recipeStart, setRecipeStart] = useState(() => sundayFor(currentKstDate()));
+  const [recipeEnd, setRecipeEnd] = useState(() => addDaysLocal(sundayFor(currentKstDate()), 6));
+  const [recipeRange, setRecipeRange] = useState(() => ({
+    start: sundayFor(currentKstDate()),
+    end: addDaysLocal(sundayFor(currentKstDate()), 6),
+  }));
+  const [recipeLoading, setRecipeLoading] = useState(false);
+  const [recipeError, setRecipeError] = useState<string | null>(null);
+  const [recipeRefreshVersion, setRecipeRefreshVersion] = useState(0);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [pendingJobs, setPendingJobs] = useState<PendingAgentJob[]>([]);
   const [pendingChats, setPendingChats] = useState<PendingAgentChat[]>([]);
   const [appNotice, setAppNotice] = useState<string | null>(null);
   const pendingJobsLoaded = useRef(false);
   const pendingChatsLoaded = useRef(false);
-  const currentWeek = sundayFor(currentKstDate());
-  const recipeWeek = recipeDate ? sundayFor(recipeDate) : currentWeek;
-  const dataWeek =
-    active === "레시피"
-      ? recipeWeek
-      : selectedWeek;
+  const dataWeek = selectedWeek;
 
   useEffect(() => {
     const load = () =>
@@ -197,13 +201,11 @@ export default function Home() {
         )
         .then((data) => {
           setMealItems(data.meals ?? []);
-          setRecipes(data.recipes ?? []);
           setGrocery(data.grocery ?? []);
           setGroceryMissingRecipes(data.groceryMissingRecipes ?? []);
         })
         .catch(() => {
           setMealItems([]);
-          setRecipes([]);
           setGrocery([]);
           setGroceryMissingRecipes([]);
         });
@@ -212,6 +214,85 @@ export default function Home() {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [dataWeek, refreshVersion]);
+
+  useEffect(() => {
+    if (active !== "레시피") return;
+    const controller = new AbortController();
+    const load = async () => {
+      setRecipeLoading(true);
+      setRecipeError(null);
+      setRecipes([]);
+      try {
+        const weeks: string[] = [];
+        for (let week = sundayFor(recipeRange.start); week <= recipeRange.end; week = addDaysLocal(week, 7))
+          weeks.push(week);
+        const responses = await Promise.all(weeks.map((week) =>
+          fetch(`/api/meal-data?week=${week}`, { signal: controller.signal }),
+        ));
+        if (responses.some((response) => !response.ok))
+          throw new Error("선택한 기간의 레시피를 불러오지 못했습니다. 다시 시도해 주세요.");
+        const data = await Promise.all(responses.map((response) => response.json()));
+        if (controller.signal.aborted) return;
+        const merged = new Map<string, Recipe>();
+        for (const weekData of data) for (const recipe of (weekData.recipes ?? []) as Recipe[]) {
+          const dates = recipe.plannedDates.filter((date) => date >= recipeRange.start && date <= recipeRange.end);
+          if (!dates.length) continue;
+          const key = String(recipe.id);
+          const previous = merged.get(key);
+          merged.set(key, {
+            ...recipe,
+            plannedDates: [...new Set([...(previous?.plannedDates ?? []), ...dates])].sort(),
+          });
+        }
+        setRecipes([...merged.values()]);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setRecipeError(error instanceof Error ? error.message : "레시피 조회에 실패했습니다.");
+          setRecipes([]);
+        }
+      } finally {
+        if (!controller.signal.aborted) setRecipeLoading(false);
+      }
+    };
+    void load();
+    return () => controller.abort();
+  }, [active, recipeRange, recipeRefreshVersion, refreshVersion]);
+
+  const fetchSelectedRecipes = () => {
+    const start = Date.parse(`${recipeStart}T00:00:00Z`);
+    const end = Date.parse(`${recipeEnd}T00:00:00Z`);
+    if (!Number.isFinite(start) || !Number.isFinite(end) ||
+      new Date(start).toISOString().slice(0, 10) !== recipeStart ||
+      new Date(end).toISOString().slice(0, 10) !== recipeEnd) {
+      setRecipeError("시작일과 종료일을 모두 올바르게 선택해 주세요.");
+      return;
+    }
+    const days = Math.round((end - start) / 86_400_000) + 1;
+    if (days < 1 || days > 93) {
+      setRecipeError("종료일은 시작일 이후여야 하며, 한 번에 최대 93일까지 조회할 수 있습니다.");
+      return;
+    }
+    setRecipeRange({ start: recipeStart, end: recipeEnd });
+    setRecipeRefreshVersion((version) => version + 1);
+  };
+
+  const deleteSelectedRecipes = async (selected: Recipe[]) => {
+    const response = await fetch("/api/recipes", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startDate: recipeRange.start,
+        endDate: recipeRange.end,
+        cards: selected.map((recipe) => ({ id: recipe.id, title: recipe.title, plannedDates: recipe.plannedDates })),
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error ?? "레시피 삭제에 실패했습니다.");
+    setRecipeRefreshVersion((version) => version + 1);
+    setRefreshVersion((version) => version + 1);
+    const missing = Object.values(result.missingByWeek ?? {}).flat() as string[];
+    setAppNotice(`${result.deleted}개 레시피 카드를 삭제했습니다.${result.shoppingWeeks?.length ? ` 저장 레시피 변경으로 ${result.shoppingWeeks.length}개 주차의 장보기를 다시 계산했습니다.` : ""}${missing.length ? ` 레시피 누락으로 장보기 계산은 미완료입니다: ${missing.join(", ")}` : ""}`);
+  };
 
   useEffect(() => {
     try {
@@ -457,10 +538,15 @@ export default function Home() {
           {active === "레시피" && (
             <Recipes
               recipes={recipes}
-              weekStart={recipeWeek}
-              selectedDate={recipeDate}
-              onSelectDate={setRecipeDate}
-              onRefresh={() => setRefreshVersion((version) => version + 1)}
+              range={recipeRange}
+              startDate={recipeStart}
+              endDate={recipeEnd}
+              onStartDateChange={setRecipeStart}
+              onEndDateChange={setRecipeEnd}
+              onFetch={fetchSelectedRecipes}
+              onDelete={deleteSelectedRecipes}
+              loading={recipeLoading}
+              error={recipeError}
             />
           )}
           {active === "장보기" && (
@@ -471,13 +557,17 @@ export default function Home() {
               weekStart={selectedWeek}
               onChangeWeek={changeWeek}
               onChanged={() => setRefreshVersion((version) => version + 1)}
-              onRegenerate={() =>
-                setAgentRequest({
-                  action: "REGENERATE_GROCERY",
-                  weekStart: selectedWeek,
-                  prompt: `${selectedWeek}부터 ${addDaysLocal(selectedWeek, 6)}까지의 메뉴와 레시피는 변경하지 말고, 이미 저장되어 있고 검증된 이 주차 레시피를 합산해 장보기만 다시 계산해줘. 보유 재료와 기본 양념을 차감하고, 레시피가 빠진 메뉴가 있으면 임의로 생성하지 말고 실패 사유를 알려줘.`,
-                })
-              }
+              onRegenerate={async () => {
+                const response = await fetch("/api/grocery/rebuild", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ weekStart: selectedWeek }),
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error ?? "장보기 계산에 실패했습니다.");
+                setRefreshVersion((version) => version + 1);
+                return result.message as string;
+              }}
             />
           )}
           {active === "우리 집 메뉴" && <MenuPreferences />}
@@ -750,10 +840,12 @@ function WeekActions({
   onChangeWeek,
   onRegenerate,
   regenerateLabel,
+  disabled = false,
 }: {
   onChangeWeek?: (amount: number) => void;
   onRegenerate: () => void;
   regenerateLabel: string;
+  disabled?: boolean;
 }) {
   const controlClass =
     "grid h-11 w-11 place-items-center rounded-lg border border-black/[.08] bg-white text-black/60 transition-colors hover:bg-[#e6f3fe] hover:text-[#0075de] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40";
@@ -782,7 +874,8 @@ function WeekActions({
       <button
         type="button"
         onClick={onRegenerate}
-        className={`${controlClass} ${onChangeWeek ? "ml-1" : ""}`}
+        disabled={disabled}
+        className={`${controlClass} ${onChangeWeek ? "ml-1" : ""} disabled:cursor-wait disabled:opacity-50`}
         title={regenerateLabel}
         aria-label={regenerateLabel}
       >
@@ -955,26 +1048,67 @@ function WeekView({
 }
 function Recipes({
   recipes,
-  weekStart,
-  selectedDate,
-  onSelectDate,
-  onRefresh,
+  range,
+  startDate,
+  endDate,
+  onStartDateChange,
+  onEndDateChange,
+  onFetch,
+  onDelete,
+  loading,
+  error,
 }: {
   recipes: Recipe[];
-  weekStart: string;
-  selectedDate: string;
-  onSelectDate: (date: string) => void;
-  onRefresh: () => void;
+  range: { start: string; end: string };
+  startDate: string;
+  endDate: string;
+  onStartDateChange: (date: string) => void;
+  onEndDateChange: (date: string) => void;
+  onFetch: () => void;
+  onDelete: (recipes: Recipe[]) => Promise<void>;
+  loading: boolean;
+  error: string | null;
 }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<"전체" | "주찬" | "부찬">("전체");
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
+  const [selecting, setSelecting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setSelecting(false);
+    setDeleteError(null);
+  }, [range]);
+  const toggleSelection = (id: string) => {
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const deleteSelected = async () => {
+    const chosen = recipes.filter((recipe) => selectedIds.has(String(recipe.id)));
+    if (!chosen.length || !window.confirm(`선택한 레시피 카드 ${chosen.length}개를 삭제할까요? 이 기간의 카탈로그 카드는 다시 나타나지 않으며, 저장 레시피가 포함되면 관련 장보기도 다시 계산합니다.`)) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await onDelete(chosen);
+      setSelectedIds(new Set());
+      setSelecting(false);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "레시피 삭제에 실패했습니다.");
+    } finally {
+      setDeleting(false);
+    }
+  };
   const filtered = useMemo(
     () =>
       recipes
         .filter(
           (recipe) =>
-            (!selectedDate || recipe.plannedDates.includes(selectedDate)) &&
             (category === "전체" || recipe.category === category) &&
             (recipe.title.includes(query) ||
               recipe.tags.some((tag) => tag.includes(query))),
@@ -983,32 +1117,35 @@ function Recipes({
           (a.plannedDates[0] ?? "9999-12-31").localeCompare(b.plannedDates[0] ?? "9999-12-31")
           || a.title.localeCompare(b.title, "ko"),
         ),
-    [category, query, recipes, selectedDate],
+    [category, query, recipes],
   );
   return (
     <>
-      <PageTitle label={`${formatWeekRange(weekStart)} 레시피`} title="레시피">
-        <WeekActions
-          onRegenerate={onRefresh}
-          regenerateLabel="레시피 DB 다시 조회"
-        />
+      <PageTitle label={`${range.start} – ${range.end} 레시피`} title="레시피">
+        <button type="button" onClick={() => { setSelecting((value) => !value); setSelectedIds(new Set()); }} className="h-11 rounded-lg border border-black/[.1] bg-white px-4 text-sm font-medium hover:bg-[#e6f3fe] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40">
+          {selecting ? "선택 취소" : "카드 선택"}
+        </button>
       </PageTitle>
-      <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
-        <label htmlFor="recipe-date" className="font-medium text-black/70">날짜 선택</label>
-        <input
-          id="recipe-date"
-          type="date"
-          value={selectedDate}
-          onChange={(event) => onSelectDate(event.target.value)}
-          className="h-11 rounded-lg border border-black/[.1] bg-white px-3 text-black focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
-        />
-        {selectedDate && (
-          <button type="button" onClick={() => onSelectDate("")} className="h-11 rounded-lg px-3 text-[#0075de] hover:bg-[#e6f3fe] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40">
-            이번 주 전체 보기
-          </button>
-        )}
-        <span className="text-black/55">선택한 식단에 연결된 DB 레시피를 날짜순으로 표시합니다.</span>
-      </div>
+      <form className="mb-4 flex flex-wrap items-end gap-3 text-sm" onSubmit={(event) => { event.preventDefault(); onFetch(); }}>
+        <label className="grid gap-1 font-medium text-black/70" htmlFor="recipe-start">시작일
+          <input id="recipe-start" type="date" value={startDate} onChange={(event) => onStartDateChange(event.target.value)} className="h-11 rounded-lg border border-black/[.1] bg-white px-3 text-black focus:outline-none focus:ring-2 focus:ring-[#0075de]/40" />
+        </label>
+        <label className="grid gap-1 font-medium text-black/70" htmlFor="recipe-end">종료일
+          <input id="recipe-end" type="date" value={endDate} onChange={(event) => onEndDateChange(event.target.value)} className="h-11 rounded-lg border border-black/[.1] bg-white px-3 text-black focus:outline-none focus:ring-2 focus:ring-[#0075de]/40" />
+        </label>
+        <button type="submit" disabled={loading} className="h-11 rounded-lg bg-[#0075de] px-4 font-medium text-white hover:bg-[#0066c5] focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 disabled:cursor-wait disabled:opacity-60">
+          {loading ? "가져오는 중…" : "레시피 가져오기"}
+        </button>
+        <span className="pb-3 text-black/60">선택 기간의 식단 레시피를 DB에서 가져옵니다. 최대 93일.</span>
+      </form>
+      {error && <p role="alert" className="mb-4 rounded-lg bg-[#ffe0db] px-3 py-2 text-sm text-black/80">{error}</p>}
+      {selecting && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg bg-[#e6f3fe] px-3 py-2 text-sm">
+          <span className="font-medium">{selectedIds.size}개 선택</span>
+          <button type="button" disabled={deleting || selectedIds.size === 0} onClick={() => void deleteSelected()} className="rounded-lg bg-[#0075de] px-3 py-2 font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">{deleting ? "삭제 중…" : "선택한 카드 삭제"}</button>
+          {deleteError && <span role="alert" className="text-[#a52315]">{deleteError}</span>}
+        </div>
+      )}
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div
           className="inline-flex w-fit rounded-lg border border-black/[.1] bg-white p-1"
@@ -1043,20 +1180,22 @@ function Recipes({
         {filtered.map((recipe) => (
           <Card
             key={recipe.id}
-            role="button"
+            role={selecting ? "checkbox" : "button"}
+            aria-checked={selecting ? selectedIds.has(String(recipe.id)) : undefined}
             tabIndex={0}
-            onClick={() => setSelectedRecipe(recipe)}
+            onClick={() => selecting ? toggleSelection(String(recipe.id)) : setSelectedRecipe(recipe)}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
-                setSelectedRecipe(recipe);
+                if (selecting) toggleSelection(String(recipe.id));
+                else setSelectedRecipe(recipe);
               }
             }}
-            className="cursor-pointer overflow-hidden transition-colors hover:border-black/20 focus:outline-none focus:ring-2 focus:ring-[#0075de]/40"
+            className={`cursor-pointer overflow-hidden transition-colors hover:border-black/20 focus:outline-none focus:ring-2 focus:ring-[#0075de]/40 ${selecting && selectedIds.has(String(recipe.id)) ? "ring-2 ring-[#0075de]" : ""}`}
           >
             <div className={`grid h-24 place-items-center ${recipe.color}`}>
               <span className="grid h-11 w-11 place-items-center rounded-full bg-white/70 text-black/65">
-                <ChefHat size={22} />
+                {selecting && selectedIds.has(String(recipe.id)) ? <Check size={22} /> : <ChefHat size={22} />}
               </span>
             </div>
             <CardContent className="p-4">
@@ -1077,7 +1216,7 @@ function Recipes({
                   </span>
                 ))}
               </div>
-              {recipe.sourceUrl && (
+              {recipe.sourceUrl && !selecting && (
                 <a
                   onClick={(event) => event.stopPropagation()}
                   href={recipe.sourceUrl}
@@ -1096,9 +1235,9 @@ function Recipes({
           </Card>
         ))}
       </div>
-      {!filtered.length && (
+      {!filtered.length && !loading && (
         <p className="rounded-xl border border-dashed border-black/[.12] p-8 text-center text-sm text-black/55">
-          {selectedDate ? `${selectedDate}에 표시할` : "표시할"} {category === "전체" ? "레시피" : category}이 없습니다. 날짜나 검색어를 바꿔 보세요.
+          {range.start}부터 {range.end}까지 표시할 {category === "전체" ? "레시피" : category}이 없습니다. 기간이나 검색어를 바꿔 보세요.
         </p>
       )}
       {selectedRecipe && (
@@ -1149,7 +1288,7 @@ function RecipeModal({ recipe, close }: { recipe: Recipe; close: () => void }) {
         )}
         {String(recipe.id).startsWith("catalog-") && (
           <p className="mt-3 rounded-lg bg-[#fff0d4] px-3 py-2 text-sm leading-6 text-black/75">
-            원문 분량입니다. 가족 인원에 맞춘 양과 알레르기·금지 재료, 아기 몫 분리 및 보관 방법은 조리 전에 확인해 주세요. 이 레시피는 장보기에 자동 합산되지 않습니다.
+            원문 분량입니다. 가족 인원에 맞춘 양과 알레르기, 아기 몫 분리 및 보관 방법은 조리 전에 확인해 주세요.
           </p>
         )}
         <section className="mt-6">
@@ -1246,13 +1385,22 @@ function GroceryList({
   weekStart: string;
   onChangeWeek: (amount: number) => void;
   onChanged: () => void;
-  onRegenerate: () => void;
+  onRegenerate: () => Promise<string>;
 }) {
   const [name, setName] = useState("");
   const [category, setCategory] = useState("기타");
   const [categoryFilter, setCategoryFilter] = useState("전체");
   const [busy, setBusy] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
   const [message, setMessage] = useState("");
+  const rebuild = async () => {
+    if (rebuilding) return;
+    setRebuilding(true);
+    setMessage("");
+    try { setMessage(await onRegenerate()); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "장보기 계산에 실패했습니다."); }
+    finally { setRebuilding(false); }
+  };
   const remaining = grocery.filter((i) => !i.done).length;
   const categoryFilters = useMemo(
     () => [
@@ -1351,17 +1499,18 @@ function GroceryList({
   );
   return (
     <>
-      {missingRecipes.length > 0 && <div role="status" className="mb-5 rounded-xl border border-[#9a6500]/25 bg-[#fff0d4] p-4 text-sm text-[#644100]"><p className="font-medium">장보기 계산 미완료 · 확인된 레시피가 부족해요</p><p className="mt-2">아래 메뉴의 재료가 빠질 수 있습니다. 기존 장보기 목록을 확인하고 레시피를 보충한 뒤 다시 계산해 주세요.</p><details className="mt-3"><summary className="cursor-pointer">누락 메뉴 {missingRecipes.length}개 보기</summary><ul className="mt-2 list-disc space-y-1 pl-5">{missingRecipes.map(item => <li key={item}>{item}</li>)}</ul></details></div>}
+      {missingRecipes.length > 0 && <div role="status" className="mb-5 rounded-xl border border-[#9a6500]/25 bg-[#fff0d4] p-4 text-sm text-[#644100]"><p className="font-medium">장보기에 담지 못한 메뉴가 있어요</p><p className="mt-2">레시피가 없거나 가족 알레르기 재료가 포함된 메뉴입니다. 아래 사유를 확인해 주세요.</p><details className="mt-3"><summary className="cursor-pointer">확인할 메뉴 {missingRecipes.length}개 보기</summary><ul className="mt-2 list-disc space-y-1 pl-5">{missingRecipes.map(item => <li key={item}>{item}</li>)}</ul></details></div>}
       <PageTitle
-        label={`${formatWeekRange(weekStart)} 필요한 재료`}
+        label={`${formatWeekRange(weekStart)} 레시피 재료 전체`}
         title="장보기"
       >
         <div className="flex flex-wrap items-center justify-end gap-2">
           <span className="mr-1 text-sm text-black/55">{remaining}개 남음</span>
           <WeekActions
             onChangeWeek={onChangeWeek}
-            onRegenerate={onRegenerate}
-            regenerateLabel="이번 주 준비된 레시피로 장보기 재계산"
+            onRegenerate={() => void rebuild()}
+            regenerateLabel="이번 주 레시피 재료 전체 다시 가져오기"
+            disabled={rebuilding}
           />
         </div>
       </PageTitle>
@@ -1458,7 +1607,7 @@ function GroceryList({
           )}
           {visibleGrocery.length > 0 && (
             <p className="mb-6 text-sm leading-6 text-black/55">
-              같은 재료가 여러 날 필요하면 처음 사용하는 날짜에 한 번만 표시합니다.
+              보유 재료와 기본 양념도 포함합니다. 같은 재료는 합쳐서 처음 사용하는 날짜에 표시하니, 필요한 구매량은 직접 판단해 주세요.
             </p>
           )}
           {groupedEntries.map(([group, items]) => (
@@ -1501,6 +1650,7 @@ function GroceryList({
                     </p>
                     <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-5 text-black/45">
                       <span>{groceryCategory(item.category)}</span>
+                      {item.quantityNote && <><span aria-hidden="true">·</span><span className="text-[#8a5a00]">{item.quantityNote}</span></>}
                       {item.usePlan && item.usePlan !== "직접 추가" && (
                         <>
                           <span aria-hidden="true">·</span>
